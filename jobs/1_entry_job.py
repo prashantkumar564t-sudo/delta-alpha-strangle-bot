@@ -53,8 +53,9 @@ def run():
     print(f"Selected CE: {ce['symbol']} (ID: {ce['id']})")
     print(f"Selected PE: {pe['symbol']} (ID: {pe['id']})")
 
-    print("\n[2/3] Executing Market Sell + 10s Wait + 75% Bracket SL...")
-    report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=1)
+    lot_size = int(os.getenv("LOT_SIZE", "1"))
+    print(f"\n[2/3] Executing Market Sell (Size: {lot_size}) + 10s Wait + 75% Bracket SL...")
+    report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=lot_size)
 
     if not report.get("success"):
         print("\n❌ Entry or Bracket SL execution failed.")
