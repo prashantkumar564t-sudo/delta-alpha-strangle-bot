@@ -1,0 +1,50 @@
+# ==========================================
+# 1. Environment & API Secrets (CRITICAL)
+# ==========================================
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# 2. Python Bytecode & Cache Files
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# ==========================================
+# 3. Dynamic Runtime Data & State
+# ==========================================
+# state.json daily orders track karta hai, ise commit nahi karna
+data/state.json
+!data/.gitkeep
+
+# ==========================================
+# 4. Logs & Trading History
+# ==========================================
+logs/*.log
+*.log
+!logs/.gitkeep
+
+# CSV export logs (Delta order/fills history)
+*.csv
+
+# ==========================================
+# 5. Virtual Environments & Editor Settings
+# ==========================================
+.venv/
+venv/
+ENV/
+env/
+
+# VS Code & PyCharm
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated
+.DS_Store
+Thumbs.db
