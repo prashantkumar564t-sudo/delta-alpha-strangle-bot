@@ -85,6 +85,24 @@ class DeltaCalculator:
 
             abs_delta = abs(raw_delta)
             quotes = ticker.get("quotes") or {}
+            mark_price = float(ticker.get("mark_price") or 0.0)
+            best_bid = float(quotes.get("best_bid") or 0.0)
+            best_ask = float(quotes.get("best_ask") or 0.0)
+
+            # --- SPREAD & LIQUIDITY SANITY CHECKS ---
+            # 1. Filter out contracts where best_bid <= 0 (must have buyers in orderbook)
+            if best_bid <= 0:
+                continue
+
+            # 2. Filter out contracts with mark_price < 5.0 (minimum premium threshold)
+            if mark_price < 5.0:
+                continue
+
+            # 3. Filter out contracts where spread / mark_price > 0.40 (excessive slippage protection)
+            if best_ask > 0 and mark_price > 0:
+                spread = best_ask - best_bid
+                if (spread / mark_price) > 0.40:
+                    continue
 
             candidate_info = {
                 "id": prod_id,
@@ -93,9 +111,9 @@ class DeltaCalculator:
                 "delta": raw_delta,
                 "abs_delta": abs_delta,
                 "delta_diff": abs(abs_delta - target_delta),
-                "mark_price": float(ticker.get("mark_price") or 0.0),
-                "best_bid": float(quotes.get("best_bid") or 0.0),
-                "best_ask": float(quotes.get("best_ask") or 0.0)
+                "mark_price": mark_price,
+                "best_bid": best_bid,
+                "best_ask": best_ask
             }
 
             if contract_type == "call_options":

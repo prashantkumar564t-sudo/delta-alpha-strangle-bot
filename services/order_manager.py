@@ -29,16 +29,43 @@ class OrderManager:
 
         ce_sell_res = self._market_sell(ce_info["id"], size, "CE", ce_info["symbol"])
         if not ce_sell_res:
-            err_msg = "[ABORT] CE Sell fail ho gaya. Strategy ruki."
+            err_msg = "❌ [ABORT] CE Sell rejected by exchange. Strategy stopped safely (No positions open)."
             print(err_msg)
-            self.notifier.send_message(f"⚠️ *DELTA BOT ALERT*\n{err_msg}")
+            self.notifier.send_message(f"🚨 *DELTA BOT ALERT*\n{err_msg}")
             return report
 
         pe_sell_res = self._market_sell(pe_info["id"], size, "PE", pe_info["symbol"])
         if not pe_sell_res:
-            err_msg = "[ABORT] PE Sell fail ho gaya. Strategy ruki."
-            print(err_msg)
-            self.notifier.send_message(f"⚠️ *DELTA BOT ALERT*\n{err_msg}")
+            err_msg = (
+                "🚨 *[CRITICAL ALERT] PE Sell failed after CE filled!*\n"
+                f"Contract `{ce_info['symbol']}` is left naked short.\n"
+                "⚡ Triggering ATOMIC ROLLBACK (Closing naked CE immediately)..."
+            )
+            print(f"\n{err_msg}")
+            self.notifier.send_message(err_msg)
+
+            # ATOMIC ROLLBACK: Market Buy back the filled CE leg immediately
+            rollback_payload = {
+                "product_id": ce_info["id"],
+                "size": size,
+                "side": "buy",
+                "order_type": "market_order"
+            }
+            rollback_res = self.client.request("POST", "/v2/orders", payload=rollback_payload)
+            if rollback_res and rollback_res.get("success"):
+                rb_msg = (
+                    "🛡️ *[ROLLBACK SUCCESSFUL] Naked CE position closed via Market Buy.*\n"
+                    f"Contract: `{ce_info['symbol']}` | Size: {size}\n"
+                    "Account is FLAT. Strategy safely aborted (Zero unhedged risk)."
+                )
+            else:
+                rb_msg = (
+                    "💥 *[ROLLBACK FAILED] Could not close naked CE position!*\n"
+                    f"Contract: `{ce_info['symbol']}` | Response: {rollback_res}\n"
+                    "🚨 IMMEDIATE MANUAL INTERVENTION REQUIRED ON DELTA EXCHANGE!"
+                )
+            print(f"\n{rb_msg}\n")
+            self.notifier.send_message(rb_msg)
             return report
 
         # ------------------------------------------------------------------
@@ -209,34 +236,84 @@ class OrderManager:
         print("\n" + msg + "\n")
         self.notifier.send_message(msg)
 
-    def square_off_all(self) -> Dict[str, Any]:
-        """Sabhi pending orders cancel karta hai aur open positions close karta hai."""
-        summary = {"cancelled_orders": 0, "closed_positions": []}
-        print("\n[CLEANUP] Cancelling all open orders...")
-        self.client.request("DELETE", "/v2/orders/all")
+    def square_off_with_retry(self, max_retries: int = 3, retry_delay: int = 4) -> Dict[str, Any]:
+        """
+        Cancels all orders and attempts to square-off positions with up to `max_retries` attempts.
+        Verifies open positions == 0 after execution.
+        """
+        summary = {
+            "success": False,
+            "attempts": 0,
+            "closed_positions": [],
+            "remaining_positions": []
+        }
 
-        pos_resp = self.client.request("GET", "/v2/positions?underlying_asset_symbol=BTC")
-        positions = pos_resp.get("result", []) if pos_resp else []
-        if isinstance(positions, dict):
-            positions = [positions]
+        for attempt in range(1, max_retries + 1):
+            summary["attempts"] = attempt
+            print(f"\n[SQUARE-OFF ATTEMPT {attempt}/{max_retries}] Starting cleanup loop...")
 
-        for pos in positions:
-            size = int(pos.get("size", 0))
-            prod_id = pos.get("product_id")
-            symbol = pos.get("product_symbol", f"ID_{prod_id}")
-            if size < 0:
+            # 1. Cancel all open orders
+            print("[1/2] Cancelling all open orders...")
+            self.client.request("DELETE", "/v2/orders/all")
+            time.sleep(1)
+
+            # 2. Query open positions
+            pos_resp = self.client.request("GET", "/v2/positions?underlying_asset_symbol=BTC")
+            raw_positions = pos_resp.get("result", []) if pos_resp else []
+            if isinstance(raw_positions, dict):
+                raw_positions = [raw_positions]
+
+            active_positions = [p for p in raw_positions if int(p.get("size", 0)) != 0]
+
+            if not active_positions:
+                print(f"[SUCCESS] No open positions detected on attempt {attempt}. Account is FLAT.")
+                summary["success"] = True
+                summary["remaining_positions"] = []
+                return summary
+
+            # 3. Close active positions via Market Order
+            print(f"[2/2] Closing {len(active_positions)} active position(s)...")
+            for pos in active_positions:
+                size = int(pos.get("size", 0))
+                prod_id = pos.get("product_id")
+                symbol = pos.get("product_symbol", f"ID_{prod_id}")
+                side = "buy" if size < 0 else "sell"
                 close_size = abs(size)
+
                 close_payload = {
                     "product_id": prod_id,
                     "size": close_size,
-                    "side": "buy",
+                    "side": side,
                     "order_type": "market_order"
                 }
                 close_resp = self.client.request("POST", "/v2/orders", payload=close_payload)
+                success = close_resp.get("success", False) if close_resp else False
+
                 summary["closed_positions"].append({
                     "symbol": symbol,
                     "size": close_size,
-                    "success": close_resp.get("success", False)
+                    "side": side,
+                    "success": success,
+                    "attempt": attempt
                 })
+                print(f"[*] Position {symbol} close order sent (Size: {close_size}, Side: {side}, Success: {success})")
+
+            # Wait before re-checking
+            print(f"[WAIT] Waiting {retry_delay}s for fills to settle before next verification...")
+            time.sleep(retry_delay)
+
+        # Final verification check
+        final_resp = self.client.request("GET", "/v2/positions?underlying_asset_symbol=BTC")
+        final_raw = final_resp.get("result", []) if final_resp else []
+        if isinstance(final_raw, dict):
+            final_raw = [final_raw]
+
+        remaining = [p for p in final_raw if int(p.get("size", 0)) != 0]
+        summary["remaining_positions"] = remaining
+        summary["success"] = (len(remaining) == 0)
 
         return summary
+
+    def square_off_all(self) -> Dict[str, Any]:
+        """Backwards-compatible wrapper calling square_off_with_retry."""
+        return self.square_off_with_retry(max_retries=3, retry_delay=4)

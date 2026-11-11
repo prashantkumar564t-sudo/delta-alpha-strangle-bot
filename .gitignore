@@ -24,6 +24,7 @@ data/state.json
 # ==========================================
 # 4. Logs & Trading History
 # ==========================================
+logs/
 logs/*.log
 *.log
 !logs/.gitkeep
