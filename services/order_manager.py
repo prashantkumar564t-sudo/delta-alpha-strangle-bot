@@ -1,4 +1,5 @@
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Any, Optional, List
 from services.notifier import TelegramNotifier
 
@@ -44,17 +45,41 @@ class OrderManager:
             print(f"\n{err_msg}")
             self.notifier.send_message(err_msg)
 
-            # ATOMIC ROLLBACK: Market Buy back the filled CE leg immediately
+            # ATOMIC ROLLBACK: Buy back the filled CE leg immediately with reduce_only=True
             rollback_payload = {
                 "product_id": ce_info["id"],
                 "size": size,
                 "side": "buy",
-                "order_type": "market_order"
+                "order_type": "market_order",
+                "reduce_only": True
             }
             rollback_res = self.client.request("POST", "/v2/orders", payload=rollback_payload)
+            if not rollback_res or not rollback_res.get("success"):
+                print(f"[ROLLBACK FALLBACK] Market buy failed: {rollback_res}. Attempting aggressive limit fallback...")
+                ce_tick = float(ce_info.get("tick_size") or 0.1)
+                best_ask = float(ce_info.get("best_ask") or 0.0)
+                mark_p = float(ce_info.get("mark_price") or 0.0)
+                aggressive_px = best_ask if best_ask > 0 else (mark_p * 1.25 if mark_p > 0 else 0.0)
+                if aggressive_px > 0:
+                    rounded_px = self._round_to_tick_size(aggressive_px, ce_tick)
+                    px_str = self._format_price(rounded_px, ce_tick)
+                    limit_payload = {
+                        "product_id": ce_info["id"],
+                        "size": size,
+                        "side": "buy",
+                        "order_type": "limit_order",
+                        "limit_price": px_str,
+                        "reduce_only": True,
+                        "time_in_force": "ioc"
+                    }
+                    rollback_res = self.client.request("POST", "/v2/orders", payload=limit_payload)
+                    if not rollback_res or not rollback_res.get("success"):
+                        limit_payload["time_in_force"] = "gtc"
+                        rollback_res = self.client.request("POST", "/v2/orders", payload=limit_payload)
+
             if rollback_res and rollback_res.get("success"):
                 rb_msg = (
-                    "🛡️ *[ROLLBACK SUCCESSFUL] Naked CE position closed via Market Buy.*\n"
+                    "🛡️ *[ROLLBACK SUCCESSFUL] Naked CE position closed via Buy.*\n"
                     f"Contract: `{ce_info['symbol']}` | Size: {size}\n"
                     "Account is FLAT. Strategy safely aborted (Zero unhedged risk)."
                 )
@@ -102,20 +127,28 @@ class OrderManager:
         print(f"[*] PE Confirmed: {pe_info['symbol']} | Real Entry: {pe_entry} USD")
 
         # ------------------------------------------------------------------
-        # STEP 3: ATTACH 75% PURE BRACKET STOP-LOSS
+        # STEP 3: ATTACH 75% PURE BRACKET STOP-LOSS (TICK-SIZE COMPLIANT)
         # ------------------------------------------------------------------
         print("\n>>> STEP 3: ATTACHING 75% BRACKET STOP LOSS ORDERS <<<")
-        ce_sl_trigger = round(ce_entry * 1.75, 2)
-        pe_sl_trigger = round(pe_entry * 1.75, 2)
+        ce_tick = float(ce_info.get("tick_size") or 0.1)
+        pe_tick = float(pe_info.get("tick_size") or 0.1)
+
+        raw_ce_sl = ce_entry * 1.75
+        raw_pe_sl = pe_entry * 1.75
+
+        ce_sl_trigger = self._round_to_tick_size(raw_ce_sl, ce_tick)
+        pe_sl_trigger = self._round_to_tick_size(raw_pe_sl, pe_tick)
 
         report["ce"]["sl_trigger"] = ce_sl_trigger
         report["pe"]["sl_trigger"] = pe_sl_trigger
+        report["ce"]["tick_size"] = ce_tick
+        report["pe"]["tick_size"] = pe_tick
 
-        print(f"[CE SL Setup] Trigger @ {ce_sl_trigger} USD (Pure Market Stop)")
-        self._place_bracket_sl(ce_info["id"], ce_sl_trigger, "CE")
+        print(f"[CE SL Setup] Trigger @ {ce_sl_trigger} USD (Pure Market Stop, Tick: {ce_tick})")
+        self._place_bracket_sl(ce_info["id"], ce_sl_trigger, "CE", tick_size=ce_tick)
 
-        print(f"[PE SL Setup] Trigger @ {pe_sl_trigger} USD (Pure Market Stop)")
-        self._place_bracket_sl(pe_info["id"], pe_sl_trigger, "PE")
+        print(f"[PE SL Setup] Trigger @ {pe_sl_trigger} USD (Pure Market Stop, Tick: {pe_tick})")
+        self._place_bracket_sl(pe_info["id"], pe_sl_trigger, "PE", tick_size=pe_tick)
 
         # ------------------------------------------------------------------
         # 10 SECOND REST (Stop Order Confirmation Wait)
@@ -132,8 +165,8 @@ class OrderManager:
         print(">>> STEP 4: VERIFYING BRACKET SL REGISTRATION <<<")
         open_orders = self._get_open_orders()
 
-        ce_sl_active = self._verify_bracket_in_orders(open_orders, ce_info["id"], ce_sl_trigger)
-        pe_sl_active = self._verify_bracket_in_orders(open_orders, pe_info["id"], pe_sl_trigger)
+        ce_sl_active = self._verify_bracket_in_orders(open_orders, ce_info["id"], ce_sl_trigger, tick_size=ce_tick)
+        pe_sl_active = self._verify_bracket_in_orders(open_orders, pe_info["id"], pe_sl_trigger, tick_size=pe_tick)
 
         report["ce"]["sl_verified"] = ce_sl_active
         report["pe"]["sl_verified"] = pe_sl_active
@@ -184,12 +217,41 @@ class OrderManager:
                 return p
         return None
 
-    def _place_bracket_sl(self, product_id: int, trigger_price: float, leg_name: str) -> Optional[int]:
+    @staticmethod
+    def _round_to_tick_size(price: float, tick_size: float) -> float:
+        """
+        Rounds price to the nearest valid multiple of tick_size using Decimal.
+        Ensures strict compliance with Delta Exchange orderbook price filters.
+        """
+        if not tick_size or tick_size <= 0:
+            return round(price, 2)
+        d_price = Decimal(str(round(price, 8)))
+        d_tick = Decimal(str(tick_size))
+        num_ticks = (d_price / d_tick).quantize(Decimal('1'), rounding=ROUND_HALF_UP)
+        rounded = num_ticks * d_tick
+        return float(rounded)
+
+    @staticmethod
+    def _format_price(price: float, tick_size: float = 0.1) -> str:
+        """
+        Formats price as clean string matching tick_size precision without scientific notation.
+        """
+        if not tick_size or tick_size <= 0:
+            return str(round(price, 2))
+        if tick_size >= 1.0 and float(price).is_integer():
+            return str(int(price))
+        dec_places = abs(Decimal(str(tick_size)).as_tuple().exponent)
+        return f"{price:.{dec_places}f}"
+
+    def _place_bracket_sl(self, product_id: int, trigger_price: float, leg_name: str, tick_size: float = 0.1) -> Optional[int]:
+        # Clean string representation without scientific notation or trailing precision artifacts
+        price_str = self._format_price(trigger_price, tick_size)
+
         payload = {
             "product_id": product_id,
             "stop_loss_order": {
                 "order_type": "market_order",
-                "stop_price": str(trigger_price)
+                "stop_price": price_str
             },
             "bracket_stop_trigger_method": "last_traded_price"
         }
@@ -197,7 +259,7 @@ class OrderManager:
         if resp and resp.get("success"):
             sl_info = resp.get("result", {}).get("stop_loss_order", {})
             oid = sl_info.get("id")
-            print(f"[{leg_name} BRACKET SL ATTACHED] ID: {oid} | Trigger: {trigger_price} USD (Market Order)")
+            print(f"[{leg_name} BRACKET SL ATTACHED] ID: {oid} | Trigger: {price_str} USD (Market Order, Tick: {tick_size})")
             return oid
         else:
             print(f"[{leg_name} BRACKET SL FAILED] Response: {resp}")
@@ -209,14 +271,15 @@ class OrderManager:
             return []
         return resp.get("result", [])
 
-    def _verify_bracket_in_orders(self, orders: List[Dict[str, Any]], product_id: int, expected_trigger: float) -> bool:
+    def _verify_bracket_in_orders(self, orders: List[Dict[str, Any]], product_id: int, expected_trigger: float, tick_size: float = 0.1) -> bool:
+        tolerance = max(0.2, tick_size)
         for o in orders:
             p_id = int(o.get("product_id", 0))
             is_bracket = o.get("bracket_order", False)
             stop_price = float(o.get("stop_price") or 0.0)
 
             if p_id == int(product_id) and is_bracket:
-                if abs(stop_price - expected_trigger) < 0.2:
+                if abs(stop_price - expected_trigger) <= tolerance:
                     return True
         return False
 
@@ -271,7 +334,7 @@ class OrderManager:
                 summary["remaining_positions"] = []
                 return summary
 
-            # 3. Close active positions via Market Order
+            # 3. Close active positions via Market Order (with Reduce-Only and Aggressive Limit Fallback)
             print(f"[2/2] Closing {len(active_positions)} active position(s)...")
             for pos in active_positions:
                 size = int(pos.get("size", 0))
@@ -280,14 +343,58 @@ class OrderManager:
                 side = "buy" if size < 0 else "sell"
                 close_size = abs(size)
 
+                # A. Primary Close: Market Order with reduce_only=True
                 close_payload = {
                     "product_id": prod_id,
                     "size": close_size,
                     "side": side,
-                    "order_type": "market_order"
+                    "order_type": "market_order",
+                    "reduce_only": True
                 }
                 close_resp = self.client.request("POST", "/v2/orders", payload=close_payload)
                 success = close_resp.get("success", False) if close_resp else False
+
+                # B. Automatic Fallback: If market order rejected (e.g. no opposing orders near expiry),
+                # fetch best quote or mark_price*1.25 and send aggressive limit order with reduce_only=True
+                if not success:
+                    print(f"[*] Market {side} for {symbol} rejected ({close_resp}). Attempting aggressive Limit fallback...")
+                    t_info = {}
+                    if symbol and not symbol.startswith("ID_"):
+                        ticker_resp = self.client.request_public("GET", f"/v2/tickers/{symbol}")
+                        if ticker_resp and ticker_resp.get("success"):
+                            t_info = ticker_resp.get("result", {})
+
+                    t_quotes = t_info.get("quotes") or {}
+                    best_ask = float(t_quotes.get("best_ask") or 0.0)
+                    best_bid = float(t_quotes.get("best_bid") or 0.0)
+                    mark_p = float(t_info.get("mark_price") or 0.0)
+                    tick_sz = float(t_info.get("tick_size") or 0.1)
+
+                    if side == "buy":
+                        aggressive_px = best_ask if best_ask > 0 else (mark_p * 1.25 if mark_p > 0 else 0.0)
+                    else:
+                        aggressive_px = best_bid if best_bid > 0 else (mark_p * 0.75 if mark_p > 0 else 0.0)
+
+                    if aggressive_px > 0:
+                        rounded_px = self._round_to_tick_size(aggressive_px, tick_sz)
+                        px_str = self._format_price(rounded_px, tick_sz)
+                        limit_payload = {
+                            "product_id": prod_id,
+                            "size": close_size,
+                            "side": side,
+                            "order_type": "limit_order",
+                            "limit_price": px_str,
+                            "reduce_only": True,
+                            "time_in_force": "ioc"
+                        }
+                        limit_resp = self.client.request("POST", "/v2/orders", payload=limit_payload)
+                        success = limit_resp.get("success", False) if limit_resp else False
+                        print(f"[*] Aggressive Limit IOC {side} for {symbol} @ {px_str} sent (Success: {success})")
+                        if not success:
+                            limit_payload["time_in_force"] = "gtc"
+                            gtc_resp = self.client.request("POST", "/v2/orders", payload=limit_payload)
+                            success = gtc_resp.get("success", False) if gtc_resp else False
+                            print(f"[*] Aggressive Limit GTC {side} for {symbol} @ {px_str} sent (Success: {success})")
 
                 summary["closed_positions"].append({
                     "symbol": symbol,

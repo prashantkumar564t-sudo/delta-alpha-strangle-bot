@@ -24,6 +24,7 @@
   - [The 10-Second Matching Engine Settlement Wait](#the-10-second-matching-engine-settlement-wait)
   - [Real Fill Discovery via `/v2/positions`](#real-fill-discovery-via-v2positions)
   - [The 75% Pure Stop-Market Bracket Order](#the-75-pure-stop-market-bracket-order)
+  - [Static Stop-Loss Invariant: No Trailing, No Break-Even Adjustment](#static-stop-loss-invariant-no-trailing-no-break-even-adjustment)
   - [Post-Placement Bracket Verification](#post-placement-bracket-verification)
 - [5. Fault-Tolerant Atomic Rollback Engine](#5-fault-tolerant-atomic-rollback-engine)
   - [Single-Leg Execution Risk Breakdown](#single-leg-execution-risk-breakdown)
@@ -188,6 +189,15 @@ The order is transmitted to `POST /v2/orders/bracket`:
 #### Why Pure Stop-Market (No Limit Price)?
 In volatile crypto breakouts, Stop-Limit orders often fail: the market price skips past the limit price, leaving short options unfilled. A **Pure Stop-Market Order** guarantees execution by executing an unconditional market buy the moment the Last Traded Price touches the trigger.
 
+### Static Stop-Loss Invariant: No Trailing, No Break-Even Adjustment
+The strategy adheres strictly to a **pure, static risk-management protocol**:
+1. **Per-Leg Independence:** Each leg (CE and PE) is protected by its own static 75% Stop-Loss calculated directly from its executed fill price:
+   $$\text{Stop-Loss Trigger} = \text{round}(\text{Real Entry Price} \times 1.75,\, 2)$$
+2. **Untouched / Zero Mid-Session Modification:** Once placed on Delta Exchange at entry time (10:00 AM IST), the Stop-Loss orders are **never modified, trailed, or moved**. They remain active at their original price levels until either:
+   - Market price touches the 75% trigger (executing the protective market buy), OR
+   - The 17:15 PM IST square-off trigger is reached.
+3. **Strict No Break-Even Rule:** If one leg is stopped out during the session, the remaining leg is **NOT** trailed to break-even or shifted to cost. It stays untouched at its original static 75% level to avoid getting prematurely whipsawed out and allow maximum intraday theta decay.
+
 ### Post-Placement Bracket Verification
 The bot pauses for another 10 seconds, then queries `GET /v2/orders?state=open`. It verifies that:
 1. `bracket_order == True` on each leg.
@@ -270,11 +280,12 @@ If positions remain open after all 3 attempts (due to extreme API outages or liq
 | **Minimum Option Premium** | $\ge \$5.00\text{ USD}$ | `services/delta_calculator.py` |
 | **Maximum Bid-Ask Spread Ratio** | $\le 40\%\ (0.40)$ | `services/delta_calculator.py` |
 | **Order Type (Entry)** | Market Sell (`market_order`) | `services/order_manager.py` |
-| **Stop-Loss Multiplier** | $+75\%\ (1.75\times)$ | `services/order_manager.py` |
+| **Stop-Loss Multiplier** | $+75\%\ (1.75\times\text{ Real Entry Price})$ | `services/order_manager.py` |
+| **Stop-Loss Behavior** | Strictly Static (No Trailing, No Break-Even) | `services/order_manager.py` |
 | **Stop-Loss Execution Type** | Pure Market Bracket Stop | `services/order_manager.py` |
 | **Settlement Wait Buffers** | $10\text{ seconds} \times 2$ | `services/order_manager.py` |
 | **Entry Schedule** | `10:00:00 IST` | Crontab / `1_entry_job.py` |
-| **Exit Schedule** | `17:15:00 IST` | Crontab / `2_exit_job.py` |
+| **Exit Schedule** | `17:15:00 IST` (Full Square-Off & Order Purge) | Crontab / `2_exit_job.py` |
 | **Square-Off Max Retries** | $3\text{ attempts}$ ($4\text{s}$ backoff) | `services/order_manager.py` |
 | **Overnight Position Exposure** | $0\text{ (100% FLAT)}$ | `jobs/2_exit_job.py` |
 

@@ -32,9 +32,10 @@ def load_env(env_path: Optional[str] = None) -> None:
 
 def setup_proxy() -> Optional[str]:
     """
-    Configures and globally installs a urllib proxy opener if proxy variables are present.
-    Routes all outbound urllib.request.urlopen() calls through the static proxy.
-    Gracefully falls back to direct connection if variables are missing or empty.
+    Constructs and returns the configured proxy URL string if proxy variables are present.
+    NOTE: Does NOT globally install the opener via urllib.request.install_opener()
+    to prevent leaking public market data and Telegram alerts through the static proxy.
+    Proxy routing is isolated exclusively inside DeltaApiClient for private authenticated calls.
     """
     proxy_host = os.getenv("PROXY_HOST", "").strip()
     proxy_port = os.getenv("PROXY_PORT", "").strip()
@@ -43,17 +44,8 @@ def setup_proxy() -> Optional[str]:
 
     if proxy_host and proxy_port:
         if proxy_user and proxy_pass:
-            proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
-        else:
-            proxy_url = f"http://{proxy_host}:{proxy_port}"
-
-        proxy_handler = urllib.request.ProxyHandler({
-            "http": proxy_url,
-            "https": proxy_url
-        })
-        opener = urllib.request.build_opener(proxy_handler)
-        urllib.request.install_opener(opener)
-        return proxy_url
+            return f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+        return f"http://{proxy_host}:{proxy_port}"
 
     return None
 

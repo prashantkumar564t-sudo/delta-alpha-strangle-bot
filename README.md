@@ -41,9 +41,12 @@
 
 ## 1. Project Overview & Architecture
 
-**Delta Alpha Strangle Bot** is an autonomous quantitative trading system designed to monetize intraday **Theta (Time Decay)** on daily Bitcoin (BTC) options traded on Delta Exchange India (`cdn-ind.testnet.deltaex.org` / `api.india.delta.exchange`). 
+**Delta Alpha Strangle Bot** is an autonomous quantitative trading system designed to monetize intraday **Theta (Time Decay)** on daily Bitcoin (BTC) options traded on Delta Exchange India (`cdn-ind.testnet.deltaex.org` / `api.india.delta.exchange`).
 
-Every morning at **10:00 AM IST**, the bot scans the live option chain for contracts expiring at **17:30 IST**, identifies Out-Of-The-Money (OTM) Call (CE) and Put (PE) strikes with a Greek Delta $\approx 0.10$ ($\sim 90\%$ statistical probability of expiring worthless), and sells 1 lot of each. It immediately locks in a **75% Pure Stop-Market Bracket Stop-Loss** based on the real executed entry price. At **17:15 IST** (15 minutes before exchange settlement), it automatically closes all remaining positions, leaving the account **100% FLAT** overnight.
+The bot strictly executes a **Pure Intraday Short Strangle** according to three core operational rules:
+1. **Entry (10:00 AM IST):** Scans the live option chain for BTC contracts expiring at 17:30 IST, identifies Out-Of-The-Money (OTM) Call (CE) and Put (PE) strikes with a Greek Delta $\approx 0.10$ ($\sim 90\%$ statistical probability of expiring worthless), and executes sequential market sell orders (1 lot each).
+2. **Risk Management (Static 75% Stop-Loss):** Immediately calculates and attaches an independent, static 75% Stop-Market Bracket Stop-Loss ($\text{Real Entry Price} \times 1.75$) on each leg. Once placed, stops are **strictly untouched** — there is **no trailing stop-loss and no break-even adjustment** mid-session.
+3. **Exit (17:15 PM IST):** 15 minutes before the 17:30 IST exchange settlement, the exit engine executes an automated 3-attempt square-off loop, closes any remaining open positions at market, and purges all open orders, leaving the account **100% FLAT** overnight.
 
 ```
                            DELTA ALPHA BOT ARCHITECTURE
@@ -378,11 +381,11 @@ For a deep mathematical, quantitative, and operational breakdown of the trading 
 👉 **[STRANGLE_STRATEGY.md](STRANGLE_STRATEGY.md)**
 
 Key strategy mechanics include:
-- **Daily Theta Collapse:** Selling options 7.5 hours prior to the 17:30 IST daily settlement.
+- **10:00 AM IST Entry:** Selling 10-Delta OTM Call and Put options 7.5 hours prior to the 17:30 IST daily settlement.
 - **Liquidity & Spread Sanity Filters:** Filtering out dead bids (`best_bid <= 0`), sub-\$5 premiums (`mark_price < 5.0`), and wide spreads (`spread / mark_price > 0.40`).
 - **Atomic Rollback Engine:** Automatic emergency market buy of Leg 1 if Leg 2 fails execution.
-- **75% Bracket Stop-Loss:** Automatic market stop placement directly linked to exchange positions.
-- **3-Attempt Square-off Loop:** Triple-pass square-off loop guaranteeing 100% flat portfolios at 17:15 IST.
+- **Static 75% Bracket Stop-Loss:** Immediate placement of an independent $+75\%$ Stop-Market Bracket order on each leg. Strictly static with **zero trailing and no break-even adjustments**.
+- **17:15 PM IST Guaranteed Exit:** Triple-pass square-off loop closing all remaining open positions and cancelling all pending orders to guarantee a 100% flat portfolio.
 
 ---
 

@@ -17,8 +17,9 @@ __pycache__/
 # ==========================================
 # 3. Dynamic Runtime Data & State
 # ==========================================
-# state.json daily orders track karta hai, ise commit nahi karna
+# state.json daily orders track karta hai, products_cache.json caches 12h products metadata
 data/state.json
+data/products_cache.json
 !data/.gitkeep
 
 # ==========================================
