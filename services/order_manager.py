@@ -197,8 +197,29 @@ class OrderManager:
         resp = self.client.request("POST", "/v2/orders", payload=payload)
         success = resp.get("success", False) if resp else False
         if success:
-            oid = resp.get("result", {}).get("id")
-            print(f"[{leg_name} SOLD] {symbol} (Product: {product_id}) | Order ID: {oid}")
+            res_data = resp.get("result", {})
+            oid = res_data.get("id")
+            state = res_data.get("state")
+            cancellation_reason = res_data.get("cancellation_reason")
+
+            # 1. Immediate cancellation check from order placement response
+            if state == "cancelled":
+                print(f"[{leg_name} CANCELLED BY EXCHANGE] {symbol} (Order ID: {oid}) | Reason: {cancellation_reason}")
+                return False
+
+            # 2. If not filled/closed, poll order status to verify fill vs matching cancellation
+            if state not in ("closed", "filled"):
+                time.sleep(1)
+                order_check = self.client.request("GET", f"/v2/orders/{oid}")
+                if order_check and order_check.get("success"):
+                    checked_data = order_check.get("result", {})
+                    checked_state = checked_data.get("state")
+                    if checked_state == "cancelled":
+                        reason = checked_data.get("cancellation_reason") or "orderbook_liquidity_exhausted"
+                        print(f"[{leg_name} CANCELLED ON MATCHING] {symbol} (Order ID: {oid}) | Reason: {reason}")
+                        return False
+
+            print(f"[{leg_name} SOLD & FILLED] {symbol} (Product: {product_id}) | Order ID: {oid}")
             return True
         else:
             print(f"[{leg_name} FAILED] {resp}")

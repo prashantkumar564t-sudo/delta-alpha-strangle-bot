@@ -153,17 +153,13 @@ class DeltaCalculator:
             if mark_price < 5.0:
                 continue
 
-            # 2. Enforce minimum $5.00 best_bid threshold to prevent cheap junk fills (e.g. $0.50 USD)
-            # In live production, strictly require BOTH mark_price >= 5.0 and best_bid >= 5.0.
-            # On Testnet sandbox, if orderbooks have no synthetic bids (best_bid == 0.0), allow mark_price >= 5.0,
-            # but reject any positive bid < 5.0.
+            # 2. Require active buyers in live orderbook (prevent dead orderbook cancellations)
+            # Live production strictly requires best_bid >= 5.0 (guarantee real liquidity and prevent penny fills)
+            # Testnet requires best_bid >= 1.0 (guarantee active buyers exist so market sell does not cancel)
             is_testnet = ("testnet" in getattr(self.client, "base_url", "").lower())
-            if not is_testnet:
-                if best_bid < 5.0:
-                    continue
-            else:
-                if best_bid > 0 and best_bid < 5.0:
-                    continue
+            min_bid = 1.0 if is_testnet else 5.0
+            if best_bid < min_bid:
+                continue
 
             # 3. Filter out contracts where spread / mark_price > 0.40 (excessive slippage protection)
             if best_ask > 0 and best_bid > 0 and mark_price > 0:
