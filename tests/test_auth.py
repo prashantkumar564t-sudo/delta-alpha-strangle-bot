@@ -1,11 +1,11 @@
 import os
 import sys
-import json
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
 from config.settings import load_env
+
 load_env()
 
 from core.api_client import DeltaApiClient
@@ -14,6 +14,7 @@ from services.delta_calculator import DeltaCalculator
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org").strip().rstrip("/")
 API_KEY = os.getenv("DELTA_API_KEY", "").strip()
 API_SECRET = os.getenv("DELTA_API_SECRET", "").strip()
+
 
 def run_test():
     print("=" * 60)
@@ -57,6 +58,7 @@ def run_test():
     else:
         err = wallet_res.get("error") if wallet_res else "No response"
         print(f"\n[FAILED] Private Auth Failed: {err}")
+
 
 if __name__ == "__main__":
     run_test()

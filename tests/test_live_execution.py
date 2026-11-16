@@ -7,17 +7,19 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
 from config.settings import load_env, setup_proxy
+
 load_env()
 proxy_url = setup_proxy()
 
 from core.api_client import DeltaApiClient
 from services.delta_calculator import DeltaCalculator
-from services.order_manager import OrderManager
 from services.notifier import TelegramNotifier
+from services.order_manager import OrderManager
 
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 API_KEY = os.getenv("DELTA_API_KEY", "")
 API_SECRET = os.getenv("DELTA_API_SECRET", "")
+
 
 def run_live_execution_test():
     print("=" * 60)
@@ -135,7 +137,7 @@ def run_live_execution_test():
     print(f"[*] Open Orders Remaining: {open_orders_count}")
     print(f"[*] Open Positions Remaining: {open_positions_count}")
 
-    is_flat = (open_orders_count == 0 and open_positions_count == 0)
+    is_flat = open_orders_count == 0 and open_positions_count == 0
 
     closed_lines = []
     if closed:
@@ -168,6 +170,6 @@ def run_live_execution_test():
         notifier.send_message(warn_msg)
         sys.exit(1)
 
+
 if __name__ == "__main__":
     run_live_execution_test()
-

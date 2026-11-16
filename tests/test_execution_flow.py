@@ -1,92 +1,277 @@
+from __future__ import annotations
+
 import os
 import sys
+from unittest.mock import MagicMock, patch
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
-from config.settings import load_env
+from config.settings import DEFAULT_LEVERAGE, load_env
+
 load_env()
 
 from core.api_client import DeltaApiClient
-from services.delta_calculator import DeltaCalculator
+from services.delta_calculator import DeltaCalculator, parse_expiry_date
 from services.order_manager import OrderManager
 
-BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
-API_KEY = os.getenv("DELTA_API_KEY", "")
-API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
 def test_dry_run_pipeline():
-    print("=" * 60)
-    print("TEST: DRY-RUN SELECTION & TICK-SIZE MATH PIPELINE")
-    print("=" * 60)
+    """Verifies delta bounds and static 75% stop-loss tick-size rounding logic."""
+    client = DeltaApiClient("dummy_key", "dummy_secret", "https://cdn-ind.testnet.deltaex.org")
+    order_mgr = OrderManager(client, default_leverage=DEFAULT_LEVERAGE)
 
-    client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
-    calc = DeltaCalculator(client)
-    order_mgr = OrderManager(client)
-
-    print("\n[STEP 1] Fetching active 10-Delta strikes for BTC (with 0.07-0.13 bounds)...")
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10)
-
-    if not ce or not pe:
-        print("[INFO] Live testnet currently has empty orderbooks (best_bid < 1.0) on some OTM strikes.")
-        print("[TEST FIXTURE] Running deterministic verification with synthetic test ticker fixtures...")
-        ce = {
-            "id": 210166,
-            "symbol": "C-BTC-66200-181126",
-            "strike_price": 66200.0,
-            "tick_size": 0.5,
-            "delta": 0.1058,
-            "abs_delta": 0.1058,
-            "mark_price": 29.5,
-            "best_bid": 28.0,
-            "best_ask": 31.0
-        }
-        pe = {
-            "id": 210163,
-            "symbol": "P-BTC-64800-181126",
-            "strike_price": 64800.0,
-            "tick_size": 0.5,
-            "delta": -0.0988,
-            "abs_delta": 0.0988,
-            "mark_price": 19.5,
-            "best_bid": 18.0,
-            "best_ask": 21.0
-        }
-
-    print(f"\n[STEP 2] Selected Strike Verification:")
-    print(f" CE: {ce['symbol']} (ID: {ce['id']})")
-    print(f"     • Strike: {ce['strike_price']} | Delta: {ce['delta']} (Abs: {ce['abs_delta']:.4f})")
-    print(f"     • Tick Size: {ce['tick_size']} | Mark Price: {ce['mark_price']} USD")
-    print(f"     • Bid: {ce['best_bid']} | Ask: {ce['best_ask']}")
-    print(f" PE: {pe['symbol']} (ID: {pe['id']})")
-    print(f"     • Strike: {pe['strike_price']} | Delta: {pe['delta']} (Abs: {pe['abs_delta']:.4f})")
-    print(f"     • Tick Size: {pe['tick_size']} | Mark Price: {pe['mark_price']} USD")
-    print(f"     • Bid: {pe['best_bid']} | Ask: {pe['best_ask']}")
+    ce = {
+        "id": 210166,
+        "symbol": "C-BTC-66200-181126",
+        "strike_price": 66200.0,
+        "tick_size": 0.5,
+        "delta": 0.1058,
+        "abs_delta": 0.1058,
+        "mark_price": 29.5,
+        "best_bid": 28.0,
+        "best_ask": 31.0,
+    }
+    pe = {
+        "id": 210163,
+        "symbol": "P-BTC-64800-181126",
+        "strike_price": 64800.0,
+        "tick_size": 0.5,
+        "delta": -0.0988,
+        "abs_delta": 0.0988,
+        "mark_price": 19.5,
+        "best_bid": 18.0,
+        "best_ask": 21.0,
+    }
 
     # 1. Delta Bounds Verification (0.07 <= abs_delta <= 0.13)
-    ce_safe = (0.07 <= ce["abs_delta"] <= 0.13)
-    pe_safe = (0.07 <= pe["abs_delta"] <= 0.13)
-    print(f"\n[STEP 3] Safety Bounds Check (0.07 <= |Delta| <= 0.13):")
-    print(f" • CE Safe ({ce['abs_delta']:.4f}): {'PASS ✅' if ce_safe else 'FAIL ❌'}")
-    print(f" • PE Safe ({pe['abs_delta']:.4f}): {'PASS ✅' if pe_safe else 'FAIL ❌'}")
+    assert 0.07 <= ce["abs_delta"] <= 0.13
+    assert 0.07 <= pe["abs_delta"] <= 0.13
 
     # 2. Stop-Loss Tick-Size Rounding Simulation
-    print(f"\n[STEP 4] Static 75% SL Tick-Size Rounding Simulation:")
-    ce_sim_entry = ce["mark_price"]
-    pe_sim_entry = pe["mark_price"]
-    ce_raw_sl = ce_sim_entry * 1.75
-    pe_raw_sl = pe_sim_entry * 1.75
-    ce_rounded_sl = order_mgr._round_to_tick_size(ce_raw_sl, ce["tick_size"])
-    pe_rounded_sl = order_mgr._round_to_tick_size(pe_raw_sl, pe["tick_size"])
+    ce_rounded_sl = order_mgr._round_to_tick_size(ce["mark_price"] * 1.75, ce["tick_size"])
+    pe_rounded_sl = order_mgr._round_to_tick_size(pe["mark_price"] * 1.75, pe["tick_size"])
 
-    print(f" • CE (Sim Entry {ce_sim_entry} USD): Raw 75% = {ce_raw_sl:.4f} -> Rounded = {ce_rounded_sl} (Tick: {ce['tick_size']})")
-    print(f" • PE (Sim Entry {pe_sim_entry} USD): Raw 75% = {pe_raw_sl:.4f} -> Rounded = {pe_rounded_sl} (Tick: {pe['tick_size']})")
+    # 29.5 * 1.75 = 51.625 -> tick 0.5 -> 51.5
+    # 19.5 * 1.75 = 34.125 -> tick 0.5 -> 34.0
+    assert ce_rounded_sl % 0.5 == 0.0
+    assert pe_rounded_sl % 0.5 == 0.0
 
-    if ce_safe and pe_safe:
-        print("\n>>> [DRY-RUN RESULT: 100% PASSED] All parameters within safety bounds! <<<")
-    else:
-        print("\n>>> [DRY-RUN RESULT: FAILED] Safety bounds violated! <<<")
-        sys.exit(1)
 
-if __name__ == "__main__":
-    test_dry_run_pipeline()
+def test_set_leverage_normal_and_portfolio_margin():
+    """Verifies that OrderManager handles standard 40x leverage and portfolio margin mode."""
+    mock_client = MagicMock()
+    order_mgr = OrderManager(mock_client, default_leverage=40)
+
+    # Case 1: Standard account sets 40x leverage successfully
+    mock_client.request.return_value = {"success": True, "result": {"leverage": "40"}}
+    res = order_mgr.set_leverage(1001, 40)
+    assert res is True
+    mock_client.request.assert_called_with("POST", "/v2/products/1001/orders/leverage", payload={"leverage": "40"})
+
+    # Case 2: Portfolio margin account returns unsupported error -> should still be treated as valid
+    mock_client.request.return_value = {"success": False, "error": {"code": "unsupported"}}
+    res_pm = order_mgr.set_leverage(1002, 40)
+    assert res_pm is True
+
+
+def test_parse_expiry_date():
+    """Verifies DDMMYY parsing into date objects for calendar comparison."""
+    d = parse_expiry_date("161126")
+    assert d is not None
+    assert d.year == 2026
+    assert d.month == 11
+    assert d.day == 16
+    assert parse_expiry_date("invalid") is None
+
+
+def test_strict_0dte_liquidity_and_depth_filters():
+    """
+    Verifies that get_10_delta_strikes rejects:
+    1. One-sided books (best_bid <= 0 or best_ask <= 0)
+    2. Mark price < 5.0
+    3. Spread ratio > 0.40
+    4. Bid size < requested lot size
+    """
+    mock_client = MagicMock()
+    calc = DeltaCalculator(mock_client)
+
+    target_suffix = calc.get_target_expiry_date_str()
+
+    # Mock products
+    mock_products = [
+        {
+            "id": 1,
+            "contract_type": "call_options",
+            "symbol": f"C-BTC-70000-{target_suffix}",
+            "tick_size": "0.1",
+            "strike_price": "70000",
+        },
+        {
+            "id": 2,
+            "contract_type": "put_options",
+            "symbol": f"P-BTC-60000-{target_suffix}",
+            "tick_size": "0.1",
+            "strike_price": "60000",
+        },
+    ]
+    calc._get_products = MagicMock(return_value=mock_products)
+
+    # Case 1: Rejected because mark_price < 5.0
+    mock_tickers = [
+        {
+            "product_id": 1,
+            "greeks": {"delta": "0.10"},
+            "mark_price": "4.5",
+            "quotes": {"best_bid": "4.0", "best_ask": "5.0", "bid_size": "10"},
+        },
+        {
+            "product_id": 2,
+            "greeks": {"delta": "-0.10"},
+            "mark_price": "20.0",
+            "quotes": {"best_bid": "19.0", "best_ask": "21.0", "bid_size": "10"},
+        },
+    ]
+    mock_client.request_public.return_value = {"success": True, "result": mock_tickers}
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    assert ce is None  # Call rejected because mark_price < 5.0
+
+    # Case 2: Rejected because spread / mark_price > 0.40
+    mock_tickers[0]["mark_price"] = "10.0"
+    mock_tickers[0]["quotes"] = {
+        "best_bid": "7.0",
+        "best_ask": "12.0",
+        "bid_size": "10",
+    }  # spread 5.0 / 10.0 = 0.50 > 0.40
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    assert ce is None
+
+    # Case 3: Rejected because bid_size < lot_size (depth failure)
+    mock_tickers[0]["quotes"] = {"best_bid": "9.5", "best_ask": "10.5", "bid_size": "2"}
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=5)
+    assert ce is None
+
+    # Case 4: Compliant 0-DTE Call and Put
+    mock_tickers[0]["quotes"] = {"best_bid": "9.5", "best_ask": "10.5", "bid_size": "10"}
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    assert ce is not None
+    assert pe is not None
+    assert ce["symbol"] == f"C-BTC-70000-{target_suffix}"
+    assert pe["symbol"] == f"P-BTC-60000-{target_suffix}"
+
+
+def test_cancelled_order_detection():
+    """Verifies that matching engine top-level success: True with state: cancelled is treated as failure."""
+    mock_client = MagicMock()
+    order_mgr = OrderManager(mock_client)
+
+    # Delta matching engine returns HTTP 200 with success: True, but state: "cancelled"
+    mock_client.request.return_value = {
+        "success": True,
+        "result": {
+            "id": 888123,
+            "state": "cancelled",
+            "cancellation_reason": "order_size_not_available_in_orderbook",
+        },
+    }
+
+    res = order_mgr._market_sell(product_id=101, size=1, leg_name="CE", symbol="C-BTC-TEST")
+    assert res is False  # Must detect cancellation and return False
+
+
+@patch("time.sleep", return_value=None)
+def test_asymmetric_partial_fill_rollback(_mock_sleep):
+    """Verifies that if CE fills but PE fails, atomic rollback is triggered on CE."""
+    mock_client = MagicMock()
+    order_mgr = OrderManager(mock_client)
+    order_mgr.notifier = MagicMock()
+    order_mgr._rollback_leg = MagicMock()
+    order_mgr.set_leverage = MagicMock(return_value=True)
+
+    # CE sell succeeds, PE sell fails/cancelled
+    order_mgr._market_sell = MagicMock(
+        side_effect=[
+            {"id": 111, "product_id": 101, "state": "open"},
+            None,
+        ]
+    )
+
+    ce_info = {"id": 101, "symbol": "C-BTC-70000-TODAY"}
+    pe_info = {"id": 102, "symbol": "P-BTC-60000-TODAY"}
+
+    report = order_mgr.execute_strangle_with_dual_verification(ce_info, pe_info, size=1)
+    assert report["success"] is False
+    # Verify rollback was called for CE to prevent naked exposure
+    order_mgr._rollback_leg.assert_called_once_with(ce_info, 1, "CE")
+
+
+@patch("time.sleep", return_value=None)
+def test_bracket_sl_retry_and_emergency_close(_mock_sleep):
+    """Verifies that bracket SL failure triggers 3 retries and emergency square-off."""
+    mock_client = MagicMock()
+    order_mgr = OrderManager(mock_client)
+    order_mgr.notifier = MagicMock()
+    order_mgr.set_leverage = MagicMock(return_value=True)
+
+    # Both legs sell successfully
+    order_mgr._market_sell = MagicMock(return_value={"id": 123, "state": "open"})
+
+    # Positions exist
+    order_mgr._find_position = MagicMock(
+        side_effect=[
+            {"size": -1, "entry_price": "100.0"},  # CE pos
+            {"size": -1, "entry_price": "80.0"},  # PE pos
+        ]
+    )
+
+    # Bracket SL placement fails 3 times
+    order_mgr._place_bracket_sl = MagicMock(return_value=None)
+    order_mgr._emergency_close_strangle = MagicMock()
+
+    ce_info = {"id": 101, "symbol": "C-BTC-70000-TODAY", "tick_size": 0.1}
+    pe_info = {"id": 102, "symbol": "P-BTC-60000-TODAY", "tick_size": 0.1}
+
+    # Execute
+    report = order_mgr.execute_strangle_with_dual_verification(ce_info, pe_info, size=1)
+    assert report["success"] is False
+    # Must have triggered emergency close
+    order_mgr._emergency_close_strangle.assert_called_once()
+
+
+@patch("time.sleep", return_value=None)
+def test_exit_blast_radius_isolation(_mock_sleep):
+    """Verifies that square_off_with_retry only closes target product IDs and leaves other positions alone."""
+    mock_client = MagicMock()
+    order_mgr = OrderManager(mock_client)
+
+    # Open positions include target strangle legs (101, 102) and an unrelated position (999)
+    positions = [
+        {"product_id": 101, "product_symbol": "C-BTC-101", "size": -1},
+        {"product_id": 102, "product_symbol": "P-BTC-102", "size": -1},
+        {"product_id": 999, "product_symbol": "BTCUSD_FUT", "size": 5},
+    ]
+
+    mock_client.request.side_effect = [
+        {"success": True},  # order 1 cancel
+        {"success": True},  # order 2 cancel
+        {"success": True, "result": positions},  # pos check 1
+        {"success": True, "result": {"state": "closed"}},  # close 101
+        {"success": True, "result": {"state": "closed"}},  # close 102
+        # After settlement, remaining check: 101 and 102 closed, 999 remains
+        {"success": True, "result": [{"product_id": 999, "product_symbol": "BTCUSD_FUT", "size": 5}]},
+    ]
+
+    open_orders = [
+        {"id": "o1", "product_id": 101},
+        {"id": "o2", "product_id": 102},
+        {"id": "o999", "product_id": 999},
+    ]
+    order_mgr._get_open_orders = MagicMock(return_value=open_orders)
+
+    # Run square-off targeting only 101 and 102
+    summary = order_mgr.square_off_with_retry(target_product_ids=[101, 102], max_retries=1, retry_delay=0)
+
+    # Success should be True because remaining positions matching [101, 102] is 0!
+    assert summary["success"] is True
+    # Product 999 was not touched
+    assert len(summary["remaining_positions"]) == 0

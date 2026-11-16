@@ -22,6 +22,7 @@ if os.path.exists(ENV_PATH):
 
 from services.notifier import TelegramNotifier
 
+
 def run_telegram_test():
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -49,6 +50,7 @@ def run_telegram_test():
         print("\n[SUCCESS] Message successfully delivered to Telegram!")
     else:
         print("\n[FAILED] Message send nahi hua. Token/Chat ID ya internet connection check karein.")
+
 
 if __name__ == "__main__":
     run_telegram_test()

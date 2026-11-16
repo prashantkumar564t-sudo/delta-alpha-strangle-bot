@@ -1,8 +1,7 @@
 import os
-import urllib.request
-from typing import Optional
 
-def load_env(env_path: Optional[str] = None) -> None:
+
+def load_env(env_path: str | None = None) -> None:
     """
     Lightweight built-in .env parser using only standard library.
     Parses key-value pairs, ignores empty lines and comments (#),
@@ -30,7 +29,8 @@ def load_env(env_path: Optional[str] = None) -> None:
             key, val = line.split("=", 1)
             os.environ[key.strip()] = val.strip().strip("'\"")
 
-def setup_proxy() -> Optional[str]:
+
+def setup_proxy() -> str | None:
     """
     Constructs and returns the configured proxy URL string if proxy variables are present.
     NOTE: Does NOT globally install the opener via urllib.request.install_opener()
@@ -49,6 +49,7 @@ def setup_proxy() -> Optional[str]:
 
     return None
 
+
 # Auto-load on import
 load_env()
 ACTIVE_PROXY = setup_proxy()
@@ -57,3 +58,4 @@ API_KEY = os.getenv("DELTA_API_KEY", "")
 API_SECRET = os.getenv("DELTA_API_SECRET", "")
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 LOT_SIZE = int(os.getenv("LOT_SIZE", "1"))
+DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "40"))

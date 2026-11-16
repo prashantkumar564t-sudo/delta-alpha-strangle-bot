@@ -1,0 +1,9 @@
+line-length = 120
+target-version = "py310"
+
+[lint]
+ignore = [
+    "N999",   # Cron job numbered scripts (1_entry_job, 2_exit_job)
+    "BLE001", # Blind Exception catching for resilient network loops & cache read fallbacks
+    "S110",   # Safe try-except-pass in stale cache fallback
+]
