@@ -61,3 +61,8 @@ TARGET_LOTS = int(os.getenv("TARGET_LOTS", os.getenv("LOT_SIZE", "1000")))
 MIN_TRADEABLE_LOTS = int(os.getenv("MIN_TRADEABLE_LOTS", "100"))
 LOT_SIZE = TARGET_LOTS
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "40"))
+
+# Telegram Notifications
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "").strip()

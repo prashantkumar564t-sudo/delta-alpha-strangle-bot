@@ -36,6 +36,7 @@
 - [9. Strategy & Operational Logic](#9-strategy--operational-logic)
 - [10. Repository Directory Structure](#10-repository-directory-structure)
 - [11. Risk Disclaimer & Safety Rules](#11-risk-disclaimer--safety-rules)
+- [12. Strategic Production Roadmap (`ROADMAP.md`)](ROADMAP.md)
 
 ---
 
@@ -159,7 +160,7 @@ In India, major ISPs occasionally block the domain `webshare.io` at the DNS leve
 
 ## 4. Step 3: Telegram Bot & Telemetry Setup
 
-The bot sends real-time Markdown trade telemetry directly to your phone via Telegram.
+The bot features an institutional **Dual-Broadcast Alerting Engine** built with Python's standard library (`urllib.request`).
 
 1. **Create the Telegram Bot:**
    - Open Telegram and search for [@BotFather](https://t.me/BotFather).
@@ -170,13 +171,27 @@ The bot sends real-time Markdown trade telemetry directly to your phone via Tele
      1234567890:ABCdefGhIJKlmNoPQRstuVWXyz
      ```
    - Copy this token; this is your `TELEGRAM_BOT_TOKEN`.
-2. **Retrieve your Chat ID:**
+2. **Retrieve your Admin Chat ID (`TELEGRAM_CHAT_ID`):**
    - In Telegram, search for [@userinfobot](https://t.me/userinfobot) and tap `/start`.
    - It will reply with your personal numeric **Id** (e.g., `987654321`).
    - Copy this number; this is your `TELEGRAM_CHAT_ID`.
-3. **Activate your Bot:**
-   - Search for your newly created bot username in Telegram and tap **Start** (or send `/start`).
-   - *Note: Bots cannot initiate messages to users until the user has sent at least one message.*
+3. **Optional Public/Community Channel (`TELEGRAM_CHANNEL_ID`):**
+   - Create a read-only Telegram Channel for verified community alerts.
+   - Add your bot as an **Administrator** with permission `Post Messages`.
+   - Forward any message from the channel to [@userinfobot](https://t.me/userinfobot) or use web Telegram to copy the numeric ID (prefixed with `-100`, e.g., `-1002345678901`).
+   - Set `TELEGRAM_CHANNEL_ID=-100...` in your `.env`.
+4. **Dual-Broadcast Isolation Invariant:**
+   - **Trade Alerts (Broadcast to Both DM & Channel):** Clean execution alerts (Template 1 Entry, Template 2 Anti-Trap Shield, Template 3 Cost Trail, and Template 4 17:15 Session Scorecard) are broadcast to both your private DM and public channel.
+   - **System Errors & Tracebacks (Strictly Admin DM):** Connection retries, execution warnings, and unhandled tracebacks are strictly routed to `TELEGRAM_CHAT_ID` only.
+
+### 4 Institutional Alert Templates
+
+| Template | Triggering Job | Contents |
+| :--- | :--- | :--- |
+| **Template 1 — Entry Executed** | `1_entry_job.py` | Date/IST Time, Spot, Target vs. Allocated Lots (20% L1 Downsizing alert), L1 Bid Depth & Spread %, Strikes, Entry prices, 100% SL levels, Total Credit, and Trail Monitor status. |
+| **Template 2 — Anti-Trap Shield** | `services/delta_calculator.py` | Triggered Layer (`Spread > 3.5%`, `Depth < 500`, `Mark Gap > 2%`, or `2.5s Drift`), contract symbol, exact violation reason, and live orderbook metrics. |
+| **Template 3 — Cost Trail Activated** | `services/order_manager.py` | Breached leg exit price & PnL, surviving leg's new breakeven SL (`1.0x entry_price`), order ID, and risk-free status. |
+| **Template 4 — 17:15 Session Scorecard**| `2_exit_job.py` | Outcome Classification (Type 1 Full Decay, Type 2 Runner Survived, Type 3 Cost Trailed, Type 5 Double SL), leg PnL, Gross PnL, 4.13% fees, and Net Realized PnL. |
 
 ---
 
@@ -193,12 +208,15 @@ DELTA_API_KEY=your_delta_api_key_here
 DELTA_API_SECRET=your_delta_api_secret_here
 DELTA_BASE_URL=https://cdn-ind.testnet.deltaex.org
 
-# Position Sizing
-LOT_SIZE=1
+# Position Sizing & Dynamic Liquidity Allocation
+TARGET_LOTS=1000
+MIN_TRADEABLE_LOTS=100
+LOT_SIZE=1000
 
-# Telegram Alerts
+# Telegram Alerts & Dual-Broadcast
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TELEGRAM_CHAT_ID=your_telegram_chat_id_here
+TELEGRAM_CHANNEL_ID=your_telegram_channel_id_here # Optional (e.g. -100xxxxxxxxxx for public channel)
 
 # Static Proxy Credentials (Example Placeholders)
 PROXY_HOST=198.51.100.42

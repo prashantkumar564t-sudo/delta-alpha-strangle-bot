@@ -82,23 +82,65 @@ def run():
             print(f"[STATE WARN] Could not update state.json: {e}")
 
     # 3. Telegram Alert
-    status_lines = []
-    if closed:
-        for c in closed:
-            status_lines.append(f"• `{c.get('symbol')}` : Market {c.get('side', 'Buy').capitalize()} (Closed)")
-    else:
-        status_lines.append("• No open positions remaining (Already SL hit during the day)")
-
     if is_flat:
-        msg = (
-            "🏁 *DELTA ALPHA STRANGLE — SQUARE-OFF COMPLETE*\n\n"
-            f"🕒 Time: `{datetime.now().strftime('%H:%M:%S IST')}`\n"
-            f"🧹 Pending Orders: Cancelled (Verified 0)\n"
-            f"📊 Positions Closed: {len(closed)}\n\n" + "\n".join(status_lines) + "\n\n"
-            "🛡️ *Status:* Flat (Zero Overnight Risk Verified ✅)"
+        trade_date = state_data.get("trade_date", datetime.now().strftime("%Y-%m-%d"))
+        time_str = datetime.now().strftime("%H:%M:%S IST")
+        allocated_lots = int(state_data.get("allocated_lots") or state_data.get("target_lots") or 1000)
+        trail_status = state_data.get("trail_status", "ARMED")
+
+        ce_data = state_data.get("ce", {})
+        pe_data = state_data.get("pe", {})
+        ce_sym = ce_data.get("symbol", "BTC-CE")
+        pe_sym = pe_data.get("symbol", "BTC-PE")
+        ce_entry = float(ce_data.get("entry_price") or 0.0)
+        pe_entry = float(pe_data.get("entry_price") or 0.0)
+
+        # Determine outcome classification
+        stopped_leg = state_data.get("stopped_leg")
+        if trail_status == "TRAILED":
+            outcome_type = f"Type 2: 1 SL Hit ({stopped_leg}) + Runner Survived (Theta Buffer)"
+            if stopped_leg == "CE":
+                ce_exit = float(ce_data.get("sl_trigger") or (ce_entry * 2.0))
+                pe_exit = 0.50
+            else:
+                pe_exit = float(pe_data.get("sl_trigger") or (pe_entry * 2.0))
+                ce_exit = 0.50
+        elif trail_status == "BOTH_CLOSED":
+            outcome_type = "Type 3: 1 SL Hit + 2nd Trailed to Cost (Breakeven Locked)"
+            ce_exit = ce_entry
+            pe_exit = pe_entry
+        else:
+            outcome_type = "Type 1: Full Theta Decay (Both OTM Expired Worthless)"
+            ce_exit = 0.50
+            pe_exit = 0.50
+
+        ce_pnl = (ce_entry - ce_exit) * allocated_lots * 0.001
+        pe_pnl = (pe_entry - pe_exit) * allocated_lots * 0.001
+        gross_pnl_usd = ce_pnl + pe_pnl
+        turnover_usd = (ce_entry + ce_exit + pe_entry + pe_exit) * allocated_lots * 0.001
+        fees_usd = turnover_usd * 0.0413
+        net_pnl_usd = gross_pnl_usd - fees_usd
+
+        msg = TelegramNotifier.format_session_scorecard(
+            date_str=trade_date,
+            time_str=time_str,
+            outcome_type=outcome_type,
+            ce_symbol=ce_sym,
+            ce_entry=ce_entry,
+            ce_exit=ce_exit,
+            ce_pnl=ce_pnl,
+            pe_symbol=pe_sym,
+            pe_entry=pe_entry,
+            pe_exit=pe_exit,
+            pe_pnl=pe_pnl,
+            allocated_lots=allocated_lots,
+            gross_pnl_usd=gross_pnl_usd,
+            fees_usd=fees_usd,
+            net_pnl_usd=net_pnl_usd,
+            inr_rate=85.0,
         )
         print("\n" + msg + "\n")
-        notifier.send_message(msg)
+        notifier.send_trade_alert(msg)
         print("[FINISHED] Job 2 execution complete.\n")
     else:
         rem_lines = [f"• `{r.get('product_symbol', r.get('product_id'))}`: Size {r.get('size')}" for r in remaining]
@@ -111,7 +153,7 @@ def run():
             "👉 *PLEASE LOG IN TO DELTA EXCHANGE AND CLOSE MANUALLY IMMEDIATELY!*"
         )
         print("\n" + emergency_msg + "\n")
-        notifier.send_message(emergency_msg)
+        notifier.send_system_error(emergency_msg)
         sys.exit(1)
 
 

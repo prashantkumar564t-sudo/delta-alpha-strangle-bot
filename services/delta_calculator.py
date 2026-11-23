@@ -431,9 +431,18 @@ class DeltaCalculator:
 
             if final_lots < min_tradeable_lots:
                 print(f"[ANTI-TRAP BLOCKED] Sizing below threshold: {sizing_msg}")
-                self.notifier.send_message(
-                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED]*\n• Reason: {sizing_msg}\n🛡️ Session skipped cleanly (No execution)."
+                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                    date_str=datetime.now().strftime("%Y-%m-%d"),
+                    time_str=datetime.now().strftime("%H:%M:%S"),
+                    layer_name="Layer 2 — Top Bid Depth Cushion (< 500 contracts)",
+                    contract_symbol=f"{best_ce['symbol']} / {best_pe['symbol']}",
+                    violation_reason=sizing_msg,
+                    mark_price=best_ce.get("mark_price"),
+                    best_bid=best_ce.get("best_bid"),
+                    best_ask=best_ce.get("best_ask"),
+                    bid_size=min(float(best_ce.get("bid_size", 0.0)), float(best_pe.get("bid_size", 0.0))),
                 )
+                self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"\n[DYNAMIC SIZING] {sizing_msg}")
@@ -450,12 +459,26 @@ class DeltaCalculator:
             )
             if not ce_ok:
                 print(f"[ANTI-TRAP BLOCKED] CE Rejected: {ce_reason}")
-                self.notifier.send_message(
-                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED CE]*\n"
-                    f"• Contract: `{best_ce['symbol']}`\n"
-                    f"• Reason: {ce_reason}\n"
-                    "🛡️ Session skipped cleanly (No naked risk)."
+                layer_name = "Layer 1 — Maximum Bid-Ask Spread Gate (> 3.5%)"
+                if "gap" in ce_reason.lower():
+                    layer_name = "Layer 3 — Mark-to-Bid Slippage Gap (> 2.0%)"
+                elif "deviation" in ce_reason.lower() or "stability" in ce_reason.lower():
+                    layer_name = "Layer 4 — 2.5s Microstructure Spoofing Shift"
+                elif "depth" in ce_reason.lower() or "cushion" in ce_reason.lower():
+                    layer_name = "Layer 2 — Top Bid Depth Cushion"
+
+                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                    date_str=datetime.now().strftime("%Y-%m-%d"),
+                    time_str=datetime.now().strftime("%H:%M:%S"),
+                    layer_name=layer_name,
+                    contract_symbol=best_ce["symbol"],
+                    violation_reason=ce_reason,
+                    mark_price=best_ce.get("mark_price"),
+                    best_bid=best_ce.get("best_bid"),
+                    best_ask=best_ce.get("best_ask"),
+                    bid_size=best_ce.get("bid_size"),
                 )
+                self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"[ANTI-TRAP AUDIT] Auditing PE ({best_pe['symbol']}) through 4-layer filter at {final_lots} lots...")
@@ -471,12 +494,26 @@ class DeltaCalculator:
             )
             if not pe_ok:
                 print(f"[ANTI-TRAP BLOCKED] PE Rejected: {pe_reason}")
-                self.notifier.send_message(
-                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED PE]*\n"
-                    f"• Contract: `{best_pe['symbol']}`\n"
-                    f"• Reason: {pe_reason}\n"
-                    "🛡️ Session skipped cleanly (No naked risk)."
+                layer_name = "Layer 1 — Maximum Bid-Ask Spread Gate (> 3.5%)"
+                if "gap" in pe_reason.lower():
+                    layer_name = "Layer 3 — Mark-to-Bid Slippage Gap (> 2.0%)"
+                elif "deviation" in pe_reason.lower() or "stability" in pe_reason.lower():
+                    layer_name = "Layer 4 — 2.5s Microstructure Spoofing Shift"
+                elif "depth" in pe_reason.lower() or "cushion" in pe_reason.lower():
+                    layer_name = "Layer 2 — Top Bid Depth Cushion"
+
+                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                    date_str=datetime.now().strftime("%Y-%m-%d"),
+                    time_str=datetime.now().strftime("%H:%M:%S"),
+                    layer_name=layer_name,
+                    contract_symbol=best_pe["symbol"],
+                    violation_reason=pe_reason,
+                    mark_price=best_pe.get("mark_price"),
+                    best_bid=best_pe.get("best_bid"),
+                    best_ask=best_pe.get("best_ask"),
+                    bid_size=best_pe.get("bid_size"),
                 )
+                self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"[ANTI-TRAP AUDIT] Both CE and PE cleared all 4 liquidity layers at {final_lots} lots! ✅")

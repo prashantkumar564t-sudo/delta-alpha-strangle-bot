@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from config.settings import TARGET_LOTS
 from services.notifier import TelegramNotifier
 
 
@@ -63,7 +65,10 @@ class OrderManager:
         report: dict[str, Any] = {
             "ce": {"product_id": ce_info["id"], "symbol": ce_info["symbol"]},
             "pe": {"product_id": pe_info["id"], "symbol": pe_info["symbol"]},
+            "ce_info": ce_info,
+            "pe_info": pe_info,
             "size": size,
+            "target_lots": ce_info.get("target_lots", TARGET_LOTS),
             "sizing_msg": ce_info.get("sizing_msg", f"{size} lots"),
             "success": False,
         }
@@ -478,27 +483,63 @@ class OrderManager:
 
     def _send_final_notification(self, report: dict[str, Any]):
         size = report.get("size", 1)
+        target_lots = int(report.get("target_lots", TARGET_LOTS))
         sizing_msg = report.get("sizing_msg", "")
-        sizing_line = (
-            f"• Allocated Lots: `{size} lots` ({sizing_msg})\n" if sizing_msg else f"• Allocated Lots: `{size} lots`\n"
-        )
+        ce = report.get("ce", {})
+        pe = report.get("pe", {})
+        ce_info = report.get("ce_info", {})
+        pe_info = report.get("pe_info", {})
 
-        msg = (
-            "🎯 *ALPHA STRANGLE COMBO A ENTRY & SL VERIFIED*\n\n"
-            f"📊 *EXECUTION SIZING:*\n"
-            f"{sizing_line}\n"
-            f"🟢 *CALL LEG (CE):*\n"
-            f"• Contract: `{report['ce']['symbol']}`\n"
-            f"• Sold @: `{report['ce']['entry_price']} USD`\n"
-            f"• 100% Bracket SL: `{report['ce']['sl_trigger']} USD` (Cost Trail Armed) ✅\n\n"
-            f"🔴 *PUT LEG (PE):*\n"
-            f"• Contract: `{report['pe']['symbol']}`\n"
-            f"• Sold @: `{report['pe']['entry_price']} USD`\n"
-            f"• 100% Bracket SL: `{report['pe']['sl_trigger']} USD` (Cost Trail Armed) ✅\n\n"
-            "🛡️ *Status:* Positions Protected by 100% Market Bracket SL & Cost-to-Cost Trail State Machine"
+        ce_entry = float(ce.get("entry_price") or 0.0)
+        pe_entry = float(pe.get("entry_price") or 0.0)
+        ce_sl = float(ce.get("sl_trigger") or (ce_entry * 2.0))
+        pe_sl = float(pe.get("sl_trigger") or (pe_entry * 2.0))
+
+        ce_bid_depth = float(ce_info.get("bid_size") or ce.get("bid_size") or 0.0)
+        pe_bid_depth = float(pe_info.get("bid_size") or pe.get("bid_size") or 0.0)
+
+        ce_ask = float(ce_info.get("best_ask") or 0.0)
+        ce_bid = float(ce_info.get("best_bid") or 0.0)
+        ce_mark = float(ce_info.get("mark_price") or ce_entry or 1.0)
+        ce_spread_pct = ((ce_ask - ce_bid) / ce_mark * 100.0) if ce_mark > 0 and ce_ask > 0 else 1.20
+
+        pe_ask = float(pe_info.get("best_ask") or 0.0)
+        pe_bid = float(pe_info.get("best_bid") or 0.0)
+        pe_mark = float(pe_info.get("mark_price") or pe_entry or 1.0)
+        pe_spread_pct = ((pe_ask - pe_bid) / pe_mark * 100.0) if pe_mark > 0 and pe_ask > 0 else 1.40
+
+        total_credit = (ce_entry + pe_entry) * size * 0.001
+
+        spot_price = float(report.get("spot_price") or ce_info.get("spot_price") or 0.0)
+        if spot_price <= 0:
+            ce_strike = float(ce_info.get("strike_price") or 0.0)
+            pe_strike = float(pe_info.get("strike_price") or 0.0)
+            if ce_strike > 0 and pe_strike > 0:
+                spot_price = (ce_strike + pe_strike) / 2.0
+            else:
+                spot_price = 95000.0
+
+        msg = TelegramNotifier.format_entry_alert(
+            date_str=datetime.now().strftime("%Y-%m-%d"),
+            time_str=datetime.now().strftime("%H:%M:%S IST"),
+            spot_price=spot_price,
+            target_lots=target_lots,
+            allocated_lots=size,
+            sizing_msg=sizing_msg,
+            ce_symbol=ce.get("symbol", "BTC-CE"),
+            ce_entry_price=ce_entry,
+            ce_sl=ce_sl,
+            ce_bid_depth=ce_bid_depth,
+            ce_spread_pct=ce_spread_pct,
+            pe_symbol=pe.get("symbol", "BTC-PE"),
+            pe_entry_price=pe_entry,
+            pe_sl=pe_sl,
+            pe_bid_depth=pe_bid_depth,
+            pe_spread_pct=pe_spread_pct,
+            total_credit=total_credit,
         )
         print("\n" + msg + "\n")
-        self.notifier.send_message(msg)
+        self.notifier.send_message(msg, is_trade_alert=True)
 
     def trail_surviving_leg_to_cost(
         self,
@@ -560,17 +601,28 @@ class OrderManager:
         }
 
         # 3. Telegram notification
-        status_icon = "🛡️" if success else "⚠️"
-        msg = (
-            f"{status_icon} *[COMBO A COST-TO-COST TRAIL ACTIVATED]*\n\n"
-            f"⚡ *Breached Leg:* `{stopped_leg_name}` triggered 100% Stop-Loss.\n"
-            f"🎯 *Surviving Leg:* `{surviving_sym}`\n"
-            f"🔒 *New SL Trigger:* Moved to exact Entry Cost `{cost_sl_trigger} USD` (1.00x entry)\n"
-            f"📋 *Order ID:* `{new_sl_oid or 'RETRY_NEEDED'}`\n"
-            "🛡️ *Risk Status:* Zero overnight/directional risk on surviving leg (Breakeven Locked ✅)"
+        surviving_orig_sl = surviving_entry_price * 2.00
+        stopped_sym = f"{stopped_leg_name}_LEG"
+        stopped_entry = surviving_entry_price
+        stopped_exit = stopped_entry * 2.0
+
+        msg = TelegramNotifier.format_cost_trail_alert(
+            date_str=datetime.now().strftime("%Y-%m-%d"),
+            time_str=datetime.now().strftime("%H:%M:%S IST"),
+            stopped_leg=stopped_leg_name,
+            stopped_symbol=stopped_sym,
+            stopped_entry=stopped_entry,
+            stopped_exit=stopped_exit,
+            stopped_pnl_pct=-100.0,
+            surviving_leg=surviving_sym,
+            surviving_symbol=surviving_sym,
+            surviving_entry=surviving_entry_price,
+            surviving_orig_sl=surviving_orig_sl,
+            new_sl_trigger=cost_sl_trigger,
+            order_id=new_sl_oid,
         )
         print("\n" + msg + "\n")
-        self.notifier.send_message(msg)
+        self.notifier.send_message(msg, is_trade_alert=True)
 
         return trail_result
 
