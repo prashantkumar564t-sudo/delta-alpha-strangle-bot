@@ -63,6 +63,8 @@ class OrderManager:
         report: dict[str, Any] = {
             "ce": {"product_id": ce_info["id"], "symbol": ce_info["symbol"]},
             "pe": {"product_id": pe_info["id"], "symbol": pe_info["symbol"]},
+            "size": size,
+            "sizing_msg": ce_info.get("sizing_msg", f"{size} lots"),
             "success": False,
         }
 
@@ -475,8 +477,16 @@ class OrderManager:
         return False
 
     def _send_final_notification(self, report: dict[str, Any]):
+        size = report.get("size", 1)
+        sizing_msg = report.get("sizing_msg", "")
+        sizing_line = (
+            f"• Allocated Lots: `{size} lots` ({sizing_msg})\n" if sizing_msg else f"• Allocated Lots: `{size} lots`\n"
+        )
+
         msg = (
             "🎯 *ALPHA STRANGLE COMBO A ENTRY & SL VERIFIED*\n\n"
+            f"📊 *EXECUTION SIZING:*\n"
+            f"{sizing_line}\n"
             f"🟢 *CALL LEG (CE):*\n"
             f"• Contract: `{report['ce']['symbol']}`\n"
             f"• Sold @: `{report['ce']['entry_price']} USD`\n"

@@ -96,6 +96,41 @@ class DeltaCalculator:
         print(f"[ERROR] Failed to fetch products: {resp}")
         return []
 
+    @staticmethod
+    def calculate_liquidity_aware_lots(
+        call_bid_size: float,
+        put_bid_size: float,
+        target_lots: int = 1000,
+        min_tradeable_lots: int = 100,
+    ) -> tuple[int, str]:
+        """
+        20% L1 Footprint Rule for Dynamic Liquidity-Aware Sizing:
+        - safe_call_lots = min(target_lots, int(call_bid_size * 0.20))
+        - safe_put_lots = min(target_lots, int(put_bid_size * 0.20))
+        - final_lots = min(safe_call_lots, safe_put_lots)
+        Blocks trade if final_lots < min_tradeable_lots (100 lots, i.e., bid depth < 500 lots).
+        """
+        safe_call = min(target_lots, int(float(call_bid_size) * 0.20))
+        safe_put = min(target_lots, int(float(put_bid_size) * 0.20))
+        final_lots = min(safe_call, safe_put)
+
+        if final_lots < min_tradeable_lots:
+            min_depth_seen = min(float(call_bid_size), float(put_bid_size))
+            msg = (
+                f"Blocked: Safe executable lots ({final_lots}) below MIN_TRADEABLE_LOTS ({min_tradeable_lots}). "
+                f"L1 Bid Depth (Call: {call_bid_size:.0f}, Put: {put_bid_size:.0f}, min: {min_depth_seen:.0f}) < 500 required."
+            )
+            return final_lots, msg
+
+        if final_lots < target_lots:
+            limiting_leg = "Call" if safe_call < safe_put else ("Put" if safe_put < safe_call else "Both")
+            limiting_depth = call_bid_size if limiting_leg == "Call" else put_bid_size
+            msg = f"Adjusted Lots: {final_lots} / {target_lots} due to L1 Bid Depth = {limiting_depth:,.0f}"
+        else:
+            msg = f"Full allocation: {final_lots} / {target_lots} lots (L1 Bid Depth >= 5,000 lots)"
+
+        return final_lots, msg
+
     def check_anti_trap_liquidity(
         self,
         product_id: int,
@@ -104,13 +139,14 @@ class DeltaCalculator:
         best_bid: float,
         best_ask: float,
         bid_size: float,
-        order_lots: int = 1,
+        order_lots: int = 1000,
+        min_tradeable_lots: int = 100,
         sleep_fn: Any = time.sleep,
     ) -> tuple[bool, str, dict[str, Any]]:
         """
         4-Layer Pre-Trade Liquidity & Anti-Trap Filter:
         Layer 1: Spread / Mark <= 0.035 (3.5% max spread barrier)
-        Layer 2: Top Bid Lots >= max(500, order_lots * 5) (>= 5x depth cushion)
+        Layer 2: 20% L1 Footprint Rule (safe_lots = min(order_lots, int(bid_size * 0.20)) >= min_tradeable_lots)
         Layer 3: (Mark - Best Bid) / Mark <= 0.020 (2.0% max Mark-to-Bid discount)
         Layer 4: 2-Snapshot Stability Check (sample twice 2.5s apart):
                  Blocks entry if Best Bid shifts > 1.5% or Top Bid Lots drops > 50%.
@@ -123,6 +159,7 @@ class DeltaCalculator:
             "best_ask": best_ask,
             "bid_size": bid_size,
             "order_lots": order_lots,
+            "min_tradeable_lots": min_tradeable_lots,
         }
 
         # Pre-check: non-positive prices
@@ -142,15 +179,31 @@ class DeltaCalculator:
             )
             return False, reason, metrics
 
-        # Layer 2: Top Bid Lots Depth Cushion (>= max(500, order_lots * 5))
-        min_depth = max(500.0, float(order_lots) * 5.0)
-        metrics["min_required_depth"] = min_depth
-        if bid_size < min_depth:
+        # Layer 2: 20% L1 Footprint Rule (Dynamic Liquidity-Aware Sizing)
+        metrics["target_lots"] = order_lots
+        metrics["min_tradeable_lots"] = min_tradeable_lots
+
+        if bid_size < 500.0:
+            safe_lots = int(float(bid_size) * 0.20)
+            metrics["safe_lots"] = safe_lots
             reason = (
-                f"Layer 2 Failed: Top Bid depth {bid_size:.1f} lots is below required cushion "
-                f"of {min_depth:.1f} lots (5x order cushion or 500 lot min floor)"
+                f"Layer 2 Failed: Top Bid depth {bid_size:.1f} < 500 lots required under 20% L1 footprint rule "
+                f"(yields {safe_lots} < MIN_TRADEABLE_LOTS {min_tradeable_lots})"
             )
             return False, reason, metrics
+
+        if order_lots >= min_tradeable_lots:
+            safe_lots = min(order_lots, int(float(bid_size) * 0.20))
+            metrics["safe_lots"] = safe_lots
+            if safe_lots < min_tradeable_lots:
+                reason = (
+                    f"Layer 2 Failed: Safe lots ({safe_lots}) below MIN_TRADEABLE_LOTS ({min_tradeable_lots}) "
+                    f"due to Top Bid depth {bid_size:.1f} < 500 lots required under 20% L1 footprint rule"
+                )
+                return False, reason, metrics
+        else:
+            safe_lots = order_lots
+            metrics["safe_lots"] = safe_lots
 
         # Layer 3: Mark-to-Bid Discount (<= 2.0%)
         discount = (mark_price - best_bid) / mark_price
@@ -214,13 +267,17 @@ class DeltaCalculator:
         symbol: str = "BTC",
         target_delta: float = 0.10,
         expiry_date_str: str | None = None,
-        lot_size: int = 1,
+        target_lots: int = 1000,
+        min_tradeable_lots: int = 100,
+        lot_size: int | None = None,
         enable_anti_trap: bool = True,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """
         Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
-        Enforces two-sided orderbook (bids AND asks required), spread <= 40%, and depth.
+        Applies Dynamic Liquidity-Aware Sizing (20% L1 footprint rule) and 4-Layer Anti-Trap Filter.
         """
+        if lot_size is not None:
+            target_lots = lot_size
         target_date_suffix = expiry_date_str or self.get_target_expiry_date_str()
         print(f"[INFO] Looking for 0-DTE Expiry Date Suffix: {target_date_suffix}")
 
@@ -359,9 +416,28 @@ class DeltaCalculator:
             )
             return None, None
 
-        # 5. 4-Layer Pre-Trade Liquidity & Anti-Trap Filter
+        # 5. Dynamic Liquidity-Aware Sizing (20% L1 Footprint Rule) & 4-Layer Pre-Trade Anti-Trap Filter
         if enable_anti_trap:
-            print(f"\n[ANTI-TRAP AUDIT] Auditing CE ({best_ce['symbol']}) through 4-layer filter...")
+            final_lots, sizing_msg = self.calculate_liquidity_aware_lots(
+                call_bid_size=best_ce["bid_size"],
+                put_bid_size=best_pe["bid_size"],
+                target_lots=target_lots,
+                min_tradeable_lots=min_tradeable_lots,
+            )
+            best_ce["allocated_lots"] = final_lots
+            best_pe["allocated_lots"] = final_lots
+            best_ce["sizing_msg"] = sizing_msg
+            best_pe["sizing_msg"] = sizing_msg
+
+            if final_lots < min_tradeable_lots:
+                print(f"[ANTI-TRAP BLOCKED] Sizing below threshold: {sizing_msg}")
+                self.notifier.send_message(
+                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED]*\n• Reason: {sizing_msg}\n🛡️ Session skipped cleanly (No execution)."
+                )
+                return None, None
+
+            print(f"\n[DYNAMIC SIZING] {sizing_msg}")
+            print(f"[ANTI-TRAP AUDIT] Auditing CE ({best_ce['symbol']}) through 4-layer filter at {final_lots} lots...")
             ce_ok, ce_reason, _ = self.check_anti_trap_liquidity(
                 product_id=best_ce["id"],
                 symbol=best_ce["symbol"],
@@ -369,7 +445,8 @@ class DeltaCalculator:
                 best_bid=best_ce["best_bid"],
                 best_ask=best_ce["best_ask"],
                 bid_size=best_ce["bid_size"],
-                order_lots=lot_size,
+                order_lots=final_lots,
+                min_tradeable_lots=min_tradeable_lots,
             )
             if not ce_ok:
                 print(f"[ANTI-TRAP BLOCKED] CE Rejected: {ce_reason}")
@@ -381,7 +458,7 @@ class DeltaCalculator:
                 )
                 return None, None
 
-            print(f"[ANTI-TRAP AUDIT] Auditing PE ({best_pe['symbol']}) through 4-layer filter...")
+            print(f"[ANTI-TRAP AUDIT] Auditing PE ({best_pe['symbol']}) through 4-layer filter at {final_lots} lots...")
             pe_ok, pe_reason, _ = self.check_anti_trap_liquidity(
                 product_id=best_pe["id"],
                 symbol=best_pe["symbol"],
@@ -389,7 +466,8 @@ class DeltaCalculator:
                 best_bid=best_pe["best_bid"],
                 best_ask=best_pe["best_ask"],
                 bid_size=best_pe["bid_size"],
-                order_lots=lot_size,
+                order_lots=final_lots,
+                min_tradeable_lots=min_tradeable_lots,
             )
             if not pe_ok:
                 print(f"[ANTI-TRAP BLOCKED] PE Rejected: {pe_reason}")
@@ -401,6 +479,11 @@ class DeltaCalculator:
                 )
                 return None, None
 
-            print("[ANTI-TRAP AUDIT] Both CE and PE successfully cleared all 4 liquidity layers! ✅")
+            print(f"[ANTI-TRAP AUDIT] Both CE and PE cleared all 4 liquidity layers at {final_lots} lots! ✅")
+        else:
+            best_ce["allocated_lots"] = target_lots
+            best_pe["allocated_lots"] = target_lots
+            best_ce["sizing_msg"] = f"Unfiltered sizing: {target_lots} lots"
+            best_pe["sizing_msg"] = f"Unfiltered sizing: {target_lots} lots"
 
         return best_ce, best_pe

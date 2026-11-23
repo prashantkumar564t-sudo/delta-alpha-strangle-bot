@@ -8,7 +8,7 @@ from datetime import datetime
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
-from config.settings import DEFAULT_LEVERAGE, LOT_SIZE, load_env
+from config.settings import DEFAULT_LEVERAGE, MIN_TRADEABLE_LOTS, TARGET_LOTS, load_env
 
 load_env()
 
@@ -32,9 +32,17 @@ def run():
     calc = DeltaCalculator(client)
     order_mgr = OrderManager(client, default_leverage=DEFAULT_LEVERAGE)
 
-    lot_size = LOT_SIZE
-    print(f"\n[1/3] Fetching 0-DTE 10-Delta Strikes (Lot Size: {lot_size})...")
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=lot_size)
+    target_lots = TARGET_LOTS
+    min_tradeable_lots = MIN_TRADEABLE_LOTS
+    print(
+        f"\n[1/3] Fetching 0-DTE 10-Delta Strikes (Target: {target_lots} lots, Min Floor: {min_tradeable_lots} lots)..."
+    )
+    ce, pe = calc.get_10_delta_strikes(
+        symbol="BTC",
+        target_delta=0.10,
+        target_lots=target_lots,
+        min_tradeable_lots=min_tradeable_lots,
+    )
 
     if not ce or not pe:
         msg = "⚠️ [JOB 1 SKIPPED] Today's 0-DTE 10-Delta strikes not available or failed spread/depth filters. Skipping entry safely."
@@ -42,13 +50,16 @@ def run():
         notifier.send_message(msg)
         return
 
+    final_lots = int(ce.get("allocated_lots", target_lots))
+    sizing_msg = ce.get("sizing_msg", f"Allocated: {final_lots} lots")
     print(f"Selected CE: {ce['symbol']} (ID: {ce['id']})")
     print(f"Selected PE: {pe['symbol']} (ID: {pe['id']})")
+    print(f"[DYNAMIC SIZING] {sizing_msg}")
 
     print(
-        f"\n[2/3] Setting {DEFAULT_LEVERAGE}x Leverage + Executing Market Sell (Size: {lot_size}) + 100% Combo A Bracket SL..."
+        f"\n[2/3] Setting {DEFAULT_LEVERAGE}x Leverage + Executing Market Sell (Size: {final_lots} lots) + 100% Combo A Bracket SL..."
     )
-    report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=lot_size)
+    report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=final_lots)
 
     if not report.get("success"):
         print("\n❌ Entry or Bracket SL execution failed.")
@@ -61,6 +72,9 @@ def run():
         "trade_date": datetime.now().strftime("%Y-%m-%d"),
         "entry_timestamp": datetime.now().isoformat(),
         "strategy": "COMBO_A",
+        "target_lots": target_lots,
+        "allocated_lots": final_lots,
+        "sizing_msg": sizing_msg,
         "sl_multiplier": 2.00,
         "trail_status": "ARMED",
         "product_ids": [ce["id"], pe["id"]],

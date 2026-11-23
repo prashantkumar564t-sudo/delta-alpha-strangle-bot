@@ -1,0 +1,157 @@
+{
+  "version": "0.8",
+  "name": "BTC Delta-10 Alpha Strangle",
+  "strategy": {
+    "Ticker": "DELTA_BTCUSD",
+    "TakeUnderlyingFromCashOrNot": "False",
+    "TrailSLtoBreakeven": "TrailSLtoBreakeven.AllLegs",
+    "SquareOffAllLegs": "False",
+    "EntryIndicators": {
+      "Type": "IndicatorTreeNodeType.OperandNode",
+      "OperandType": "OperandType.And",
+      "Value": [
+        {
+          "Type": "IndicatorTreeNodeType.DataNode",
+          "Value": {
+            "IndicatorName": "IndicatorType.TimeIndicator",
+            "Parameters": {
+              "Hour": 10,
+              "Minute": 0
+            }
+          }
+        }
+      ]
+    },
+    "ExitIndicators": {
+      "Type": "IndicatorTreeNodeType.OperandNode",
+      "OperandType": "OperandType.And",
+      "Value": [
+        {
+          "Type": "IndicatorTreeNodeType.DataNode",
+          "Value": {
+            "IndicatorName": "IndicatorType.TimeIndicator",
+            "Parameters": {
+              "Hour": 17,
+              "Minute": 15
+            }
+          }
+        }
+      ]
+    },
+    "StrategyType": "StrategyType.IntradaySameDay",
+    "MaxPositionInADay": 1,
+    "ReentryTimeRestriction": "None",
+    "SkipInitialCandles": 0,
+    "StopMonitoringTime": "None",
+    "ListOfLegConfigs": [
+      {
+        "EntryType": "EntryType.EntryByDelta",
+        "ExpiryKind": "ExpiryType.Today",
+        "InstrumentKind": "LegType.CE",
+        "LegMomentum": {
+          "Type": "None",
+          "Value": 0,
+          "Time": null
+        },
+        "LegReentrySL": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LegReentryTP": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LegStopLoss": {
+          "Type": "LegTgtSLType.Percentage",
+          "Value": 100
+        },
+        "LegTarget": {
+          "Type": "None",
+          "Value": 0
+        },
+        "LegTrailSL": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LotConfig": {
+          "Type": "LotType.Quantity",
+          "Value": 1
+        },
+        "PositionType": "PositionType.Sell",
+        "StrikeParameter": 10,
+        "id": "10zwfs52"
+      },
+      {
+        "EntryType": "EntryType.EntryByDelta",
+        "ExpiryKind": "ExpiryType.Today",
+        "InstrumentKind": "LegType.PE",
+        "LegMomentum": {
+          "Type": "None",
+          "Value": 0,
+          "Time": null
+        },
+        "LegReentrySL": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LegReentryTP": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LegStopLoss": {
+          "Type": "LegTgtSLType.Percentage",
+          "Value": 100
+        },
+        "LegTarget": {
+          "Type": "None",
+          "Value": 0
+        },
+        "LegTrailSL": {
+          "Type": "None",
+          "Value": {}
+        },
+        "LotConfig": {
+          "Type": "LotType.Quantity",
+          "Value": 1
+        },
+        "PositionType": "PositionType.Sell",
+        "StrikeParameter": 10,
+        "id": "kvc2hmhx"
+      }
+    ],
+    "IdleLegConfigs": {},
+    "OverallSL": {
+      "Type": "None",
+      "Value": 0
+    },
+    "OverallTgt": {
+      "Type": "None",
+      "Value": 0
+    },
+    "OverallTrailSL": {
+      "Type": "None",
+      "Value": {}
+    },
+    "LockAndTrail": {
+      "Type": "None",
+      "Value": {}
+    },
+    "OverallReentrySL": {
+      "Type": "None",
+      "Value": {}
+    },
+    "OverallReentryTgt": {
+      "Type": "None",
+      "Value": {}
+    },
+    "OverallMomentum": {
+      "Type": "None",
+      "Value": 0
+    },
+    "WeeklyOldRegime": false
+  },
+  "attributes": {
+    "template": "Straddle920",
+    "positional": "False"
+  }
+}

@@ -56,12 +56,11 @@ def test_anti_trap_layer1_max_spread_barrier():
 
 
 def test_anti_trap_layer2_top_bid_depth_cushion():
-    """Verifies that Layer 2 enforces Top Bid Lots >= max(500, order_lots * 5)."""
+    """Verifies that Layer 2 enforces Top Bid Lots >= 500 under 20% L1 footprint rule."""
     mock_client = MagicMock()
     calc = DeltaCalculator(mock_client)
 
-    # 1. 1 lot order -> required is max(500, 5) = 500 lots.
-    # Passing: 550 lots
+    # 1. Passing: 550 lots -> safe_lots = int(550 * 0.20) = 110 >= 100 min floor
     mock_client.request_public.return_value = {
         "success": True,
         "result": {"quotes": {"best_bid": "99.0", "best_ask": "101.0", "bid_size": "550"}},
@@ -73,12 +72,13 @@ def test_anti_trap_layer2_top_bid_depth_cushion():
         best_bid=99.0,
         best_ask=101.0,
         bid_size=550.0,
-        order_lots=1,
+        order_lots=1000,
+        min_tradeable_lots=100,
         sleep_fn=None,
     )
     assert ok is True
 
-    # Failing: 450 lots (< 500 min floor)
+    # 2. Failing: 450 lots (< 500 min floor -> safe_lots = 90 < 100)
     ok, reason, _metrics = calc.check_anti_trap_liquidity(
         product_id=1,
         symbol="C-BTC-100-TEST",
@@ -86,26 +86,60 @@ def test_anti_trap_layer2_top_bid_depth_cushion():
         best_bid=99.0,
         best_ask=101.0,
         bid_size=450.0,
-        order_lots=1,
+        order_lots=1000,
+        min_tradeable_lots=100,
         sleep_fn=None,
     )
     assert ok is False
     assert "Layer 2 Failed" in reason
 
-    # 2. Large order: 200 lots -> required is max(500, 1000) = 1000 lots.
-    # 800 lots fails 5x cushion test
-    ok, reason, _metrics = calc.check_anti_trap_liquidity(
-        product_id=1,
-        symbol="C-BTC-100-TEST",
-        mark_price=100.0,
-        best_bid=99.0,
-        best_ask=101.0,
-        bid_size=800.0,
-        order_lots=200,
-        sleep_fn=None,
+
+def test_dynamic_liquidity_aware_sizing_full_allocation():
+    """Verifies full 1,000 lots allocation when top_bid_lots >= 5,000."""
+    calc = DeltaCalculator(MagicMock())
+
+    # Both Call and Put have >= 5,000 lots
+    lots, msg = calc.calculate_liquidity_aware_lots(
+        call_bid_size=5000.0,
+        put_bid_size=6500.0,
+        target_lots=1000,
+        min_tradeable_lots=100,
     )
-    assert ok is False
-    assert "Layer 2 Failed" in reason
+    assert lots == 1000
+    assert "Full allocation: 1000 / 1000 lots" in msg
+
+
+def test_dynamic_liquidity_aware_sizing_auto_downsizing():
+    """Verifies auto-downsizing to 600 lots when top_bid_lots == 3,000."""
+    calc = DeltaCalculator(MagicMock())
+
+    # Limiting leg has 3,000 lots (3,000 * 0.20 = 600 lots)
+    lots, msg = calc.calculate_liquidity_aware_lots(
+        call_bid_size=3000.0,
+        put_bid_size=5000.0,
+        target_lots=1000,
+        min_tradeable_lots=100,
+    )
+    assert lots == 600
+    assert "Adjusted Lots: 600 / 1000" in msg
+    assert "3,000" in msg
+
+
+def test_dynamic_liquidity_aware_sizing_block_below_min():
+    """Verifies blocking when top_bid_lots < 500 (final_lots < 100)."""
+    calc = DeltaCalculator(MagicMock())
+
+    # Bid size is 450 lots (450 * 0.20 = 90 < 100 min tradeable lots)
+    lots, msg = calc.calculate_liquidity_aware_lots(
+        call_bid_size=450.0,
+        put_bid_size=4000.0,
+        target_lots=1000,
+        min_tradeable_lots=100,
+    )
+    assert lots == 90
+    assert lots < 100
+    assert "Blocked" in msg
+    assert "below MIN_TRADEABLE_LOTS (100)" in msg
 
 
 def test_anti_trap_layer3_mark_to_bid_discount():
@@ -257,7 +291,7 @@ def test_anti_trap_blocks_get_10_delta_strikes_with_telegram():
     assert pe is None
     # Must send Telegram block alert
     calc.notifier.send_message.assert_called_once()
-    assert "ANTI-TRAP FILTER BLOCKED CE" in calc.notifier.send_message.call_args[0][0]
+    assert "ANTI-TRAP FILTER BLOCKED" in calc.notifier.send_message.call_args[0][0]
 
 
 @patch("time.sleep", return_value=None)
