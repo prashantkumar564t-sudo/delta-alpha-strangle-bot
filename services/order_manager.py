@@ -156,14 +156,14 @@ class OrderManager:
         print(f"[*] PE Confirmed: {pe_info['symbol']} | Real Entry: {pe_entry} USD")
 
         # ------------------------------------------------------------------
-        # STEP 3: ATTACH 75% PURE BRACKET STOP-LOSS (WITH 3-ATTEMPT RETRY)
+        # STEP 3: ATTACH 100% COMBO A BRACKET STOP-LOSS (WITH 3-ATTEMPT RETRY)
         # ------------------------------------------------------------------
-        print("\n>>> STEP 3: ATTACHING 75% BRACKET STOP LOSS ORDERS <<<")
+        print("\n>>> STEP 3: ATTACHING 100% COMBO A BRACKET STOP LOSS ORDERS <<<")
         ce_tick = float(ce_info.get("tick_size") or 0.1)
         pe_tick = float(pe_info.get("tick_size") or 0.1)
 
-        raw_ce_sl = ce_entry * 1.75
-        raw_pe_sl = pe_entry * 1.75
+        raw_ce_sl = ce_entry * 2.00
+        raw_pe_sl = pe_entry * 2.00
 
         ce_sl_trigger = self._round_to_tick_size(raw_ce_sl, ce_tick)
         pe_sl_trigger = self._round_to_tick_size(raw_pe_sl, pe_tick)
@@ -172,6 +172,10 @@ class OrderManager:
         report["pe"]["sl_trigger"] = pe_sl_trigger
         report["ce"]["tick_size"] = ce_tick
         report["pe"]["tick_size"] = pe_tick
+        report["ce"]["sl_mode"] = "100_PERCENT"
+        report["pe"]["sl_mode"] = "100_PERCENT"
+        report["strategy"] = "COMBO_A"
+        report["trail_status"] = "ARMED"
 
         print(f"[CE SL Setup] Trigger @ {ce_sl_trigger} USD (Pure Market Stop, Tick: {ce_tick})")
         ce_sl_oid = self._place_bracket_sl_with_retry(
@@ -182,6 +186,9 @@ class OrderManager:
         pe_sl_oid = self._place_bracket_sl_with_retry(
             pe_info["id"], pe_sl_trigger, "PE", tick_size=pe_tick, max_retries=3
         )
+
+        report["ce"]["sl_order_id"] = ce_sl_oid
+        report["pe"]["sl_order_id"] = pe_sl_oid
 
         # Fail-Safe: If Bracket SL failed after 3 retries, do NOT leave naked exposure!
         if not ce_sl_oid or not pe_sl_oid:
@@ -469,19 +476,215 @@ class OrderManager:
 
     def _send_final_notification(self, report: dict[str, Any]):
         msg = (
-            "🎯 *ALPHA STRANGLE ENTRY & SL VERIFIED*\n\n"
+            "🎯 *ALPHA STRANGLE COMBO A ENTRY & SL VERIFIED*\n\n"
             f"🟢 *CALL LEG (CE):*\n"
             f"• Contract: `{report['ce']['symbol']}`\n"
             f"• Sold @: `{report['ce']['entry_price']} USD`\n"
-            f"• 75% Bracket SL: `{report['ce']['sl_trigger']} USD` ✅\n\n"
+            f"• 100% Bracket SL: `{report['ce']['sl_trigger']} USD` (Cost Trail Armed) ✅\n\n"
             f"🔴 *PUT LEG (PE):*\n"
             f"• Contract: `{report['pe']['symbol']}`\n"
             f"• Sold @: `{report['pe']['entry_price']} USD`\n"
-            f"• 75% Bracket SL: `{report['pe']['sl_trigger']} USD` ✅\n\n"
-            "🛡️ *Status:* Positions Protected by Market Bracket SL"
+            f"• 100% Bracket SL: `{report['pe']['sl_trigger']} USD` (Cost Trail Armed) ✅\n\n"
+            "🛡️ *Status:* Positions Protected by 100% Market Bracket SL & Cost-to-Cost Trail State Machine"
         )
         print("\n" + msg + "\n")
         self.notifier.send_message(msg)
+
+    def trail_surviving_leg_to_cost(
+        self,
+        stopped_leg_name: str,
+        surviving_leg_info: dict[str, Any],
+        surviving_entry_price: float,
+        old_sl_order_id: int | None = None,
+        tick_size: float = 0.1,
+    ) -> dict[str, Any]:
+        """
+        Combo A Cost-to-Cost Trail:
+        The instant either leg triggers its 100% SL, the surviving leg's SL is moved to entry cost (1.00x entry_price).
+        1. Cancels old SL bracket/stop order if provided or open.
+        2. Places new pure stop-loss bracket at surviving_entry_price.
+        3. Sends Telegram notification.
+        """
+        surviving_pid = int(surviving_leg_info.get("product_id") or surviving_leg_info.get("id", 0))
+        surviving_sym = surviving_leg_info.get("symbol", f"ID_{surviving_pid}")
+        surviving_tick = float(surviving_leg_info.get("tick_size") or tick_size)
+
+        cost_sl_trigger = self._round_to_tick_size(surviving_entry_price, surviving_tick)
+        print(f"\n[COMBO A TRAIL] Moving surviving leg {surviving_sym} SL to entry cost: {cost_sl_trigger} USD...")
+
+        # 1. Cancel previous SL order
+        if old_sl_order_id:
+            try:
+                self.client.request(
+                    "DELETE", "/v2/orders", payload={"id": old_sl_order_id, "product_id": surviving_pid}
+                )
+            except Exception as e:
+                print(f"[WARN] Error cancelling old SL order {old_sl_order_id}: {e}")
+        else:
+            open_orders = self._get_open_orders()
+            for o in open_orders:
+                if int(o.get("product_id", 0)) == surviving_pid and (
+                    o.get("bracket_order") or o.get("stop_order_type") == "stop_loss_order" or o.get("stop_price")
+                ):
+                    o_id = o.get("id")
+                    if o_id:
+                        self.client.request("DELETE", "/v2/orders", payload={"id": o_id, "product_id": surviving_pid})
+
+        # 2. Place new bracket SL at cost
+        new_sl_oid = self._place_bracket_sl_with_retry(
+            product_id=surviving_pid,
+            trigger_price=cost_sl_trigger,
+            leg_name=f"{surviving_sym} (COST_TRAIL)",
+            tick_size=surviving_tick,
+            max_retries=3,
+        )
+
+        success = new_sl_oid is not None
+        trail_result = {
+            "success": success,
+            "stopped_leg": stopped_leg_name,
+            "surviving_symbol": surviving_sym,
+            "surviving_product_id": surviving_pid,
+            "cost_sl_trigger": cost_sl_trigger,
+            "new_sl_order_id": new_sl_oid,
+        }
+
+        # 3. Telegram notification
+        status_icon = "🛡️" if success else "⚠️"
+        msg = (
+            f"{status_icon} *[COMBO A COST-TO-COST TRAIL ACTIVATED]*\n\n"
+            f"⚡ *Breached Leg:* `{stopped_leg_name}` triggered 100% Stop-Loss.\n"
+            f"🎯 *Surviving Leg:* `{surviving_sym}`\n"
+            f"🔒 *New SL Trigger:* Moved to exact Entry Cost `{cost_sl_trigger} USD` (1.00x entry)\n"
+            f"📋 *Order ID:* `{new_sl_oid or 'RETRY_NEEDED'}`\n"
+            "🛡️ *Risk Status:* Zero overnight/directional risk on surviving leg (Breakeven Locked ✅)"
+        )
+        print("\n" + msg + "\n")
+        self.notifier.send_message(msg)
+
+        return trail_result
+
+    def monitor_and_update_cost_trail(self, state_file_path: str | None = None) -> dict[str, Any]:
+        """
+        Inspects active positions and state.json:
+        If one leg was stopped out (position closed) and surviving leg is still open,
+        triggers trail_surviving_leg_to_cost and updates state.json.
+        """
+        import json
+        import os
+
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        state_file = state_file_path or os.path.join(root_dir, "data", "state.json")
+
+        if not os.path.exists(state_file):
+            return {"status": "NO_STATE", "message": "No active state.json found"}
+
+        with open(state_file, "r", encoding="utf-8") as f:
+            state_data = json.load(f)
+
+        if state_data.get("status") in ("CLOSED", "FAILED_EXIT"):
+            return {"status": state_data.get("status"), "message": "Strategy already closed"}
+
+        if state_data.get("trail_status") == "TRAILED":
+            return {"status": "ALREADY_TRAILED", "message": "Surviving leg already trailed to cost"}
+
+        ce_data = state_data.get("ce", {})
+        pe_data = state_data.get("pe", {})
+        ce_pid = int(ce_data.get("product_id") or 0)
+        pe_pid = int(pe_data.get("product_id") or 0)
+
+        # Query live positions from exchange
+        positions = self._get_open_positions()
+        ce_pos = self._find_position(positions, ce_pid) if ce_pid else None
+        pe_pos = self._find_position(positions, pe_pid) if pe_pid else None
+
+        # Check if CE is stopped out while PE is still open
+        if not ce_pos and pe_pos:
+            res = self.trail_surviving_leg_to_cost(
+                stopped_leg_name="CE",
+                surviving_leg_info=pe_data,
+                surviving_entry_price=float(pe_data.get("entry_price") or 0.0),
+                old_sl_order_id=pe_data.get("sl_order_id"),
+                tick_size=float(pe_data.get("tick_size") or 0.1),
+            )
+            state_data["trail_status"] = "TRAILED"
+            state_data["stopped_leg"] = "CE"
+            state_data["surviving_leg"] = "PE"
+            state_data["pe"]["sl_trigger"] = res.get("cost_sl_trigger")
+            state_data["pe"]["sl_mode"] = "COST_TO_COST"
+            state_data["pe"]["sl_order_id"] = res.get("new_sl_order_id")
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+            return {"status": "TRAILED", "stopped_leg": "CE", "surviving_leg": "PE", "detail": res}
+
+        # Check if PE is stopped out while CE is still open
+        elif not pe_pos and ce_pos:
+            res = self.trail_surviving_leg_to_cost(
+                stopped_leg_name="PE",
+                surviving_leg_info=ce_data,
+                surviving_entry_price=float(ce_data.get("entry_price") or 0.0),
+                old_sl_order_id=ce_data.get("sl_order_id"),
+                tick_size=float(ce_data.get("tick_size") or 0.1),
+            )
+            state_data["trail_status"] = "TRAILED"
+            state_data["stopped_leg"] = "PE"
+            state_data["surviving_leg"] = "CE"
+            state_data["ce"]["sl_trigger"] = res.get("cost_sl_trigger")
+            state_data["ce"]["sl_mode"] = "COST_TO_COST"
+            state_data["ce"]["sl_order_id"] = res.get("new_sl_order_id")
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+            return {"status": "TRAILED", "stopped_leg": "PE", "surviving_leg": "CE", "detail": res}
+
+        # Both positions closed
+        elif not ce_pos and not pe_pos:
+            state_data["status"] = "CLOSED"
+            state_data["trail_status"] = "BOTH_CLOSED"
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+            return {"status": "CLOSED", "message": "Both positions closed"}
+
+        # Both positions still open -> Check if either breached 100% SL mark threshold
+        else:
+            ce_entry = float(ce_data.get("entry_price") or 0.0)
+            pe_entry = float(pe_data.get("entry_price") or 0.0)
+            ce_sl = float(ce_data.get("sl_trigger") or (ce_entry * 2.0))
+            pe_sl = float(pe_data.get("sl_trigger") or (pe_entry * 2.0))
+
+            ce_cur = float(ce_pos.get("mark_price") or 0.0)
+            pe_cur = float(pe_pos.get("mark_price") or 0.0)
+
+            if ce_cur >= ce_sl and ce_entry > 0:
+                print(f"[BREACH DETECTED] CE mark {ce_cur} >= SL {ce_sl}. Closing CE...")
+                self._rollback_leg(ce_data, abs(int(ce_pos.get("size", 1))), "CE")
+                res = self.trail_surviving_leg_to_cost(
+                    "CE", pe_data, pe_entry, pe_data.get("sl_order_id"), float(pe_data.get("tick_size") or 0.1)
+                )
+                state_data["trail_status"] = "TRAILED"
+                state_data["stopped_leg"] = "CE"
+                state_data["surviving_leg"] = "PE"
+                state_data["pe"]["sl_trigger"] = res.get("cost_sl_trigger")
+                state_data["pe"]["sl_mode"] = "COST_TO_COST"
+                with open(state_file, "w", encoding="utf-8") as f:
+                    json.dump(state_data, f, indent=2)
+                return {"status": "TRAILED", "stopped_leg": "CE", "surviving_leg": "PE"}
+
+            if pe_cur >= pe_sl and pe_entry > 0:
+                print(f"[BREACH DETECTED] PE mark {pe_cur} >= SL {pe_sl}. Closing PE...")
+                self._rollback_leg(pe_data, abs(int(pe_pos.get("size", 1))), "PE")
+                res = self.trail_surviving_leg_to_cost(
+                    "PE", ce_data, ce_entry, ce_data.get("sl_order_id"), float(ce_data.get("tick_size") or 0.1)
+                )
+                state_data["trail_status"] = "TRAILED"
+                state_data["stopped_leg"] = "PE"
+                state_data["surviving_leg"] = "CE"
+                state_data["ce"]["sl_trigger"] = res.get("cost_sl_trigger")
+                state_data["ce"]["sl_mode"] = "COST_TO_COST"
+                with open(state_file, "w", encoding="utf-8") as f:
+                    json.dump(state_data, f, indent=2)
+                return {"status": "TRAILED", "stopped_leg": "PE", "surviving_leg": "CE"}
+
+            return {"status": "OPEN_BOTH", "message": "Both legs healthy and within 100% SL threshold"}
 
     def square_off_with_retry(
         self,

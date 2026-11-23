@@ -46,7 +46,7 @@ def run():
     print(f"Selected PE: {pe['symbol']} (ID: {pe['id']})")
 
     print(
-        f"\n[2/3] Setting {DEFAULT_LEVERAGE}x Leverage + Executing Market Sell (Size: {lot_size}) + 75% Bracket SL..."
+        f"\n[2/3] Setting {DEFAULT_LEVERAGE}x Leverage + Executing Market Sell (Size: {lot_size}) + 100% Combo A Bracket SL..."
     )
     report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=lot_size)
 
@@ -60,6 +60,9 @@ def run():
     state_data = {
         "trade_date": datetime.now().strftime("%Y-%m-%d"),
         "entry_timestamp": datetime.now().isoformat(),
+        "strategy": "COMBO_A",
+        "sl_multiplier": 2.00,
+        "trail_status": "ARMED",
         "product_ids": [ce["id"], pe["id"]],
         "ce": report["ce"],
         "pe": report["pe"],

@@ -7,6 +7,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from services.notifier import TelegramNotifier
+
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -27,6 +29,7 @@ def parse_expiry_date(date_str: str) -> date | None:
 class DeltaCalculator:
     def __init__(self, api_client):
         self.client = api_client
+        self.notifier = TelegramNotifier()
 
     def get_target_expiry_date_str(self) -> str:
         """
@@ -93,12 +96,126 @@ class DeltaCalculator:
         print(f"[ERROR] Failed to fetch products: {resp}")
         return []
 
+    def check_anti_trap_liquidity(
+        self,
+        product_id: int,
+        symbol: str,
+        mark_price: float,
+        best_bid: float,
+        best_ask: float,
+        bid_size: float,
+        order_lots: int = 1,
+        sleep_fn: Any = time.sleep,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """
+        4-Layer Pre-Trade Liquidity & Anti-Trap Filter:
+        Layer 1: Spread / Mark <= 0.035 (3.5% max spread barrier)
+        Layer 2: Top Bid Lots >= max(500, order_lots * 5) (>= 5x depth cushion)
+        Layer 3: (Mark - Best Bid) / Mark <= 0.020 (2.0% max Mark-to-Bid discount)
+        Layer 4: 2-Snapshot Stability Check (sample twice 2.5s apart):
+                 Blocks entry if Best Bid shifts > 1.5% or Top Bid Lots drops > 50%.
+        """
+        metrics: dict[str, Any] = {
+            "product_id": product_id,
+            "symbol": symbol,
+            "mark_price": mark_price,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "bid_size": bid_size,
+            "order_lots": order_lots,
+        }
+
+        # Pre-check: non-positive prices
+        if mark_price <= 0.0 or best_bid <= 0.0 or best_ask <= 0.0:
+            err = f"Pre-check failed: Non-positive price/quotes (Mark: {mark_price}, Bid: {best_bid}, Ask: {best_ask})"
+            return False, err, metrics
+
+        # Layer 1: Max Spread Slippage Barrier (<= 3.5%)
+        spread = best_ask - best_bid
+        spread_ratio = spread / mark_price
+        metrics["spread"] = spread
+        metrics["spread_ratio"] = spread_ratio
+        if spread_ratio > 0.035:
+            reason = (
+                f"Layer 1 Failed: Spread ratio {spread_ratio:.2%} exceeds 3.5% limit "
+                f"(Spread: {spread:.2f}, Mark: {mark_price:.2f}, Ask: {best_ask:.2f}, Bid: {best_bid:.2f})"
+            )
+            return False, reason, metrics
+
+        # Layer 2: Top Bid Lots Depth Cushion (>= max(500, order_lots * 5))
+        min_depth = max(500.0, float(order_lots) * 5.0)
+        metrics["min_required_depth"] = min_depth
+        if bid_size < min_depth:
+            reason = (
+                f"Layer 2 Failed: Top Bid depth {bid_size:.1f} lots is below required cushion "
+                f"of {min_depth:.1f} lots (5x order cushion or 500 lot min floor)"
+            )
+            return False, reason, metrics
+
+        # Layer 3: Mark-to-Bid Discount (<= 2.0%)
+        discount = (mark_price - best_bid) / mark_price
+        metrics["mark_bid_discount"] = discount
+        if discount > 0.020:
+            reason = (
+                f"Layer 3 Failed: Mark-to-Bid discount {discount:.2%} exceeds 2.0% limit "
+                f"(Mark: {mark_price:.2f}, Bid: {best_bid:.2f})"
+            )
+            return False, reason, metrics
+
+        # Layer 4: 2-Snapshot Stability Check (sample twice 2.5s apart)
+        if sleep_fn:
+            sleep_fn(2.5)
+
+        snap2_resp = self.client.request_public("GET", f"/v2/tickers/{symbol}")
+        snap2_quotes = None
+        if snap2_resp and snap2_resp.get("success"):
+            snap2_quotes = snap2_resp.get("result", {}).get("quotes")
+        else:
+            all_t_resp = self.client.request_public("GET", "/v2/tickers")
+            if all_t_resp and all_t_resp.get("success"):
+                for t in all_t_resp.get("result", []):
+                    if t.get("product_id") == product_id or t.get("symbol") == symbol:
+                        snap2_quotes = t.get("quotes")
+                        break
+
+        if not snap2_quotes:
+            reason = "Layer 4 Failed: Could not fetch snapshot 2 quote for 2.5s stability verification"
+            return False, reason, metrics
+
+        snap2_bid = float(snap2_quotes.get("best_bid") or 0.0)
+        snap2_bid_size = float(snap2_quotes.get("bid_size") or 0.0)
+        metrics["snap2_bid"] = snap2_bid
+        metrics["snap2_bid_size"] = snap2_bid_size
+
+        if snap2_bid <= 0.0:
+            reason = "Layer 4 Failed: Snapshot 2 Best Bid collapsed to 0.0"
+            return False, reason, metrics
+
+        bid_shift = abs(snap2_bid - best_bid) / best_bid
+        metrics["bid_shift"] = bid_shift
+        if bid_shift > 0.015:
+            reason = (
+                f"Layer 4 Failed: Best Bid shifted by {bid_shift:.2%} (> 1.5% limit) "
+                f"in 2.5s snapshot ({best_bid:.2f} -> {snap2_bid:.2f})"
+            )
+            return False, reason, metrics
+
+        if snap2_bid_size < 0.50 * bid_size:
+            reason = (
+                f"Layer 4 Failed: Top Bid depth dropped by > 50% in 2.5s snapshot "
+                f"({bid_size:.1f} lots -> {snap2_bid_size:.1f} lots)"
+            )
+            return False, reason, metrics
+
+        return True, "All 4 Anti-Trap Liquidity Layers Passed", metrics
+
     def get_10_delta_strikes(
         self,
         symbol: str = "BTC",
         target_delta: float = 0.10,
         expiry_date_str: str | None = None,
         lot_size: int = 1,
+        enable_anti_trap: bool = True,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """
         Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
@@ -241,5 +358,49 @@ class DeltaCalculator:
                 f"Strict 0-DTE mandate active — skipping session cleanly."
             )
             return None, None
+
+        # 5. 4-Layer Pre-Trade Liquidity & Anti-Trap Filter
+        if enable_anti_trap:
+            print(f"\n[ANTI-TRAP AUDIT] Auditing CE ({best_ce['symbol']}) through 4-layer filter...")
+            ce_ok, ce_reason, _ = self.check_anti_trap_liquidity(
+                product_id=best_ce["id"],
+                symbol=best_ce["symbol"],
+                mark_price=best_ce["mark_price"],
+                best_bid=best_ce["best_bid"],
+                best_ask=best_ce["best_ask"],
+                bid_size=best_ce["bid_size"],
+                order_lots=lot_size,
+            )
+            if not ce_ok:
+                print(f"[ANTI-TRAP BLOCKED] CE Rejected: {ce_reason}")
+                self.notifier.send_message(
+                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED CE]*\n"
+                    f"• Contract: `{best_ce['symbol']}`\n"
+                    f"• Reason: {ce_reason}\n"
+                    "🛡️ Session skipped cleanly (No naked risk)."
+                )
+                return None, None
+
+            print(f"[ANTI-TRAP AUDIT] Auditing PE ({best_pe['symbol']}) through 4-layer filter...")
+            pe_ok, pe_reason, _ = self.check_anti_trap_liquidity(
+                product_id=best_pe["id"],
+                symbol=best_pe["symbol"],
+                mark_price=best_pe["mark_price"],
+                best_bid=best_pe["best_bid"],
+                best_ask=best_pe["best_ask"],
+                bid_size=best_pe["bid_size"],
+                order_lots=lot_size,
+            )
+            if not pe_ok:
+                print(f"[ANTI-TRAP BLOCKED] PE Rejected: {pe_reason}")
+                self.notifier.send_message(
+                    f"⚠️ *[ANTI-TRAP FILTER BLOCKED PE]*\n"
+                    f"• Contract: `{best_pe['symbol']}`\n"
+                    f"• Reason: {pe_reason}\n"
+                    "🛡️ Session skipped cleanly (No naked risk)."
+                )
+                return None, None
+
+            print("[ANTI-TRAP AUDIT] Both CE and PE successfully cleared all 4 liquidity layers! ✅")
 
         return best_ce, best_pe

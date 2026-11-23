@@ -48,14 +48,18 @@ def test_dry_run_pipeline():
     assert 0.07 <= ce["abs_delta"] <= 0.13
     assert 0.07 <= pe["abs_delta"] <= 0.13
 
-    # 2. Stop-Loss Tick-Size Rounding Simulation
-    ce_rounded_sl = order_mgr._round_to_tick_size(ce["mark_price"] * 1.75, ce["tick_size"])
-    pe_rounded_sl = order_mgr._round_to_tick_size(pe["mark_price"] * 1.75, pe["tick_size"])
+    # 2. Stop-Loss Tick-Size Rounding Simulation (Combo A 100% SL & Cost Trail)
+    ce_rounded_sl_100 = order_mgr._round_to_tick_size(ce["mark_price"] * 2.00, ce["tick_size"])
+    pe_rounded_sl_100 = order_mgr._round_to_tick_size(pe["mark_price"] * 2.00, pe["tick_size"])
+    ce_rounded_cost = order_mgr._round_to_tick_size(ce["mark_price"] * 1.00, ce["tick_size"])
+    pe_rounded_cost = order_mgr._round_to_tick_size(pe["mark_price"] * 1.00, pe["tick_size"])
 
-    # 29.5 * 1.75 = 51.625 -> tick 0.5 -> 51.5
-    # 19.5 * 1.75 = 34.125 -> tick 0.5 -> 34.0
-    assert ce_rounded_sl % 0.5 == 0.0
-    assert pe_rounded_sl % 0.5 == 0.0
+    # 29.5 * 2.00 = 59.0 -> tick 0.5 -> 59.0
+    # 19.5 * 2.00 = 39.0 -> tick 0.5 -> 39.0
+    assert ce_rounded_sl_100 % 0.5 == 0.0
+    assert pe_rounded_sl_100 % 0.5 == 0.0
+    assert ce_rounded_cost == 29.5
+    assert pe_rounded_cost == 19.5
 
 
 def test_set_leverage_normal_and_portfolio_margin():
@@ -133,7 +137,7 @@ def test_strict_0dte_liquidity_and_depth_filters():
         },
     ]
     mock_client.request_public.return_value = {"success": True, "result": mock_tickers}
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1, enable_anti_trap=False)
     assert ce is None  # Call rejected because mark_price < 5.0
 
     # Case 2: Rejected because spread / mark_price > 0.40
@@ -143,17 +147,17 @@ def test_strict_0dte_liquidity_and_depth_filters():
         "best_ask": "12.0",
         "bid_size": "10",
     }  # spread 5.0 / 10.0 = 0.50 > 0.40
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1, enable_anti_trap=False)
     assert ce is None
 
     # Case 3: Rejected because bid_size < lot_size (depth failure)
     mock_tickers[0]["quotes"] = {"best_bid": "9.5", "best_ask": "10.5", "bid_size": "2"}
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=5)
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=5, enable_anti_trap=False)
     assert ce is None
 
     # Case 4: Compliant 0-DTE Call and Put
     mock_tickers[0]["quotes"] = {"best_bid": "9.5", "best_ask": "10.5", "bid_size": "10"}
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1)
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1, enable_anti_trap=False)
     assert ce is not None
     assert pe is not None
     assert ce["symbol"] == f"C-BTC-70000-{target_suffix}"

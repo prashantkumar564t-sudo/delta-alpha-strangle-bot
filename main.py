@@ -86,11 +86,12 @@ def main() -> None:
     )
     parser.add_argument(
         "action",
-        choices=["entry", "exit", "status"],
+        choices=["entry", "exit", "status", "monitor"],
         help="Command action to execute:\n"
-        "  entry  - Run 10:00 AM IST 0-DTE entry and attach 75%% Bracket SL\n"
-        "  exit   - Run 17:15 IST auto square-off and cancel pending orders\n"
-        "  status - Inspect local state.json and live exchange positions & open orders",
+        "  entry   - Run 10:00 AM IST 0-DTE entry, check anti-trap liquidity, and attach 100%% Combo A Bracket SL\n"
+        "  exit    - Run 17:15 IST auto square-off and cancel pending orders\n"
+        "  status  - Inspect local state.json and live exchange positions & open orders\n"
+        "  monitor - Check active strangle state and execute Combo A Cost-to-Cost Trail if a leg SL triggered",
     )
 
     args = parser.parse_args()
@@ -103,6 +104,9 @@ def main() -> None:
         exit_mod.run()
     elif args.action == "status":
         show_status()
+    elif args.action == "monitor":
+        monitor_mod = importlib.import_module("jobs.3_monitor_job")
+        monitor_mod.run()
 
 
 if __name__ == "__main__":
