@@ -11,6 +11,7 @@ sys.path.append(ROOT_DIR)
 from config.settings import (
     COST_TRAIL_MULTIPLIER,
     DEFAULT_LEVERAGE,
+    DRY_RUN,
     HARD_KILL_SWITCH_USD,
     MIN_TRADEABLE_LOTS,
     SL_MULTIPLIER,
@@ -44,6 +45,7 @@ def run():
         default_leverage=DEFAULT_LEVERAGE,
         sl_multiplier=SL_MULTIPLIER,
         cost_trail_multiplier=COST_TRAIL_MULTIPLIER,
+        dry_run=DRY_RUN,
     )
 
     # ------------------------------------------------------------------
@@ -101,29 +103,34 @@ def run():
         print("\n❌ Entry or Bracket SL execution failed.")
         sys.exit(1)
 
-    print("\n[3/3] Saving active state to data/state.json...")
-    state_file = os.path.join(ROOT_DIR, "data", "state.json")
-    os.makedirs(os.path.dirname(state_file), exist_ok=True)
-    state_data = {
-        "trade_date": datetime.now().strftime("%Y-%m-%d"),
-        "entry_timestamp": datetime.now().isoformat(),
-        "strategy": "COMBO_A",
-        "target_lots": target_lots,
-        "allocated_lots": final_lots,
-        "sizing_msg": sizing_msg,
-        "sl_multiplier": SL_MULTIPLIER,
-        "cost_trail_multiplier": COST_TRAIL_MULTIPLIER,
-        "trail_status": "ARMED",
-        "product_ids": [ce["id"], pe["id"]],
-        "ce": report["ce"],
-        "pe": report["pe"],
-        "status": "OPEN_PROTECTED",
-    }
+    if DRY_RUN:
+        print(
+            "\n[DRY RUN ACTIVE] Zero exchange orders executed. Skipping data/state.json persistence so tomorrow's session starts completely fresh."
+        )
+    else:
+        print("\n[3/3] Saving active state to data/state.json...")
+        state_file = os.path.join(ROOT_DIR, "data", "state.json")
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        state_data = {
+            "trade_date": datetime.now().strftime("%Y-%m-%d"),
+            "entry_timestamp": datetime.now().isoformat(),
+            "strategy": "COMBO_A",
+            "target_lots": target_lots,
+            "allocated_lots": final_lots,
+            "sizing_msg": sizing_msg,
+            "sl_multiplier": SL_MULTIPLIER,
+            "cost_trail_multiplier": COST_TRAIL_MULTIPLIER,
+            "trail_status": "ARMED",
+            "product_ids": [ce["id"], pe["id"]],
+            "ce": report["ce"],
+            "pe": report["pe"],
+            "status": "OPEN_PROTECTED",
+        }
 
-    with open(state_file, "w", encoding="utf-8") as f:
-        json.dump(state_data, f, indent=2)
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2)
 
-    print(f"[SUCCESS] State saved to {state_file}")
+        print(f"[SUCCESS] State saved to {state_file}")
     print("[FINISHED] Job 1 execution complete.\n")
 
 

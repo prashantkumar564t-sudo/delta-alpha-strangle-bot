@@ -45,7 +45,10 @@ class TelegramNotifier:
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 res = json.loads(response.read().decode("utf-8"))
-                return bool(res.get("ok", False))
+                ok = bool(res.get("ok", False))
+                if ok:
+                    print(f"[NOTIFIER SUCCESS] Telegram message delivered to {target_chat_id} (HTTP 200, ok=True) ✅")
+                return ok
         except Exception as e:
             print(f"[NOTIFIER ERROR] Telegram delivery failed for {target_chat_id}: {e}")
             return False

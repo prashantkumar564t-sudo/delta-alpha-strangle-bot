@@ -61,6 +61,7 @@ TARGET_LOTS = int(os.getenv("TARGET_LOTS", os.getenv("LOT_SIZE", "1000")))
 MIN_TRADEABLE_LOTS = int(os.getenv("MIN_TRADEABLE_LOTS", "100"))
 LOT_SIZE = TARGET_LOTS
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "40"))
+DRY_RUN = os.getenv("DRY_RUN", "False").lower() in ("true", "1", "yes")
 
 # Combo A Stop-Loss & Risk Management Parameters
 SL_MULTIPLIER = float(os.getenv("SL_MULTIPLIER", "2.00"))

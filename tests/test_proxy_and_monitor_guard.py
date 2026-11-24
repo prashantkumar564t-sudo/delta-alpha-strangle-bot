@@ -117,3 +117,36 @@ def test_order_manager_stale_date_guard(tmp_path):
     res = order_mgr.monitor_and_update_cost_trail(state_file_path=str(state_file))
     assert res.get("status") == "STALE_DATE"
     client.request.assert_not_called()
+
+
+def test_order_manager_dry_run_simulation():
+    """Verifies that OrderManager with dry_run=True places zero orders and dispatches alert."""
+    client = MagicMock()
+    order_mgr = OrderManager(client, default_leverage=40, dry_run=True)
+    order_mgr.notifier = MagicMock()
+
+    ce = {
+        "id": 101,
+        "symbol": "C-BTC-65000-241126",
+        "best_bid": 100.0,
+        "mark_price": 105.0,
+        "tick_size": 0.5,
+    }
+    pe = {
+        "id": 102,
+        "symbol": "P-BTC-58000-241126",
+        "best_bid": 90.0,
+        "mark_price": 95.0,
+        "tick_size": 0.5,
+    }
+
+    report = order_mgr.execute_strangle_with_dual_verification(ce, pe, size=500)
+    assert report["success"] is True
+    assert report["ce"]["entry_price"] == 100.0
+    assert report["pe"]["entry_price"] == 90.0
+    assert report["ce"]["sl_trigger"] == 200.0
+    assert report["pe"]["sl_trigger"] == 180.0
+    # Zero API calls made to exchange
+    client.request.assert_not_called()
+    # Telegram entry notification dispatched
+    assert order_mgr.notifier.send_message.called

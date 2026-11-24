@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from config.settings import COST_TRAIL_MULTIPLIER, SL_MULTIPLIER, TARGET_LOTS
+from config.settings import COST_TRAIL_MULTIPLIER, DRY_RUN, SL_MULTIPLIER, TARGET_LOTS
 from services.notifier import TelegramNotifier
 
 
@@ -16,6 +16,7 @@ class OrderManager:
         default_leverage: int = 40,
         sl_multiplier: float | None = None,
         cost_trail_multiplier: float | None = None,
+        dry_run: bool | None = None,
     ):
         self.client = api_client
         self.notifier = TelegramNotifier()
@@ -24,6 +25,7 @@ class OrderManager:
         self.cost_trail_multiplier = (
             cost_trail_multiplier if cost_trail_multiplier is not None else COST_TRAIL_MULTIPLIER
         )
+        self.dry_run = dry_run if dry_run is not None else DRY_RUN
 
     def set_leverage(self, product_id: int, leverage: int = 40) -> bool:
         """
@@ -82,6 +84,44 @@ class OrderManager:
             "sizing_msg": ce_info.get("sizing_msg", f"{size} lots"),
             "success": False,
         }
+
+        # ------------------------------------------------------------------
+        # DRY-RUN SIMULATION INTERCEPTION
+        # ------------------------------------------------------------------
+        if self.dry_run:
+            print("\n==================================================")
+            print(f">>> [DRY RUN SIMULATION] SIMULATING {self.default_leverage}X LEVERAGE & MARKET SELL <<<")
+            print("==================================================")
+            ce_tick = float(ce_info.get("tick_size") or 0.1)
+            pe_tick = float(pe_info.get("tick_size") or 0.1)
+
+            ce_entry = float(ce_info.get("best_bid") or ce_info.get("mark_price") or 0.0)
+            pe_entry = float(pe_info.get("best_bid") or pe_info.get("mark_price") or 0.0)
+
+            ce_sl_trigger = self._round_to_tick_size(ce_entry * self.sl_multiplier, ce_tick)
+            pe_sl_trigger = self._round_to_tick_size(pe_entry * self.sl_multiplier, pe_tick)
+
+            report["ce"]["entry_price"] = ce_entry
+            report["pe"]["entry_price"] = pe_entry
+            report["ce"]["sl_trigger"] = ce_sl_trigger
+            report["pe"]["sl_trigger"] = pe_sl_trigger
+            report["ce"]["sl_order_id"] = 999901
+            report["pe"]["sl_order_id"] = 999902
+            report["ce"]["sl_verified"] = True
+            report["pe"]["sl_verified"] = True
+            report["ce"]["tick_size"] = ce_tick
+            report["pe"]["tick_size"] = pe_tick
+            report["ce"]["sl_mode"] = "100_PERCENT"
+            report["pe"]["sl_mode"] = "100_PERCENT"
+            report["strategy"] = "COMBO_A"
+            report["trail_status"] = "ARMED"
+            report["success"] = True
+
+            print(f"[*] [DRY RUN] CE Simulated Entry: {ce_entry} USD | SL: {ce_sl_trigger} USD")
+            print(f"[*] [DRY RUN] PE Simulated Entry: {pe_entry} USD | SL: {pe_sl_trigger} USD")
+            print(">>> [DRY RUN] DISPATCHING TELEGRAM ENTRY REPORT <<<")
+            self._send_final_notification(report)
+            return report
 
         # ------------------------------------------------------------------
         # STEP 0: CONFIGURE 40X LEVERAGE
