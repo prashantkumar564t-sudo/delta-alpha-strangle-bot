@@ -448,3 +448,52 @@ def test_monitor_and_update_cost_trail_when_pe_stopped(tmp_path):
     assert updated_state["ce"]["sl_trigger"] == 50.0  # Moved to entry cost!
     assert updated_state["ce"]["sl_mode"] == "COST_TO_COST"
     assert updated_state["ce"]["sl_order_id"] == 5678
+
+
+def test_get_10_delta_strikes_without_explicit_lot_size_regression():
+    """Regression test: calling get_10_delta_strikes without lot_size must not raise TypeError."""
+    mock_client = MagicMock()
+    calc = DeltaCalculator(mock_client)
+
+    # Mock products
+    mock_products = [
+        {"id": 1, "symbol": "C-BTC-70000-241126", "strike_price": "70000", "contract_type": "call_options", "tick_size": "0.1"},
+        {"id": 2, "symbol": "P-BTC-60000-241126", "strike_price": "60000", "contract_type": "put_options", "tick_size": "0.1"},
+    ]
+    calc._get_products = MagicMock(return_value=mock_products)
+
+    # Mock tickers with two-sided liquid book
+    mock_client.request_public.return_value = {
+        "success": True,
+        "result": [
+            {
+                "product_id": 1,
+                "symbol": "C-BTC-70000-241126",
+                "greeks": {"delta": "0.10"},
+                "mark_price": "100.0",
+                "quotes": {"best_bid": "99.0", "best_ask": "101.0", "bid_size": "1500"},
+            },
+            {
+                "product_id": 2,
+                "symbol": "P-BTC-60000-241126",
+                "greeks": {"delta": "-0.10"},
+                "mark_price": "100.0",
+                "quotes": {"best_bid": "99.0", "best_ask": "101.0", "bid_size": "1500"},
+            },
+        ],
+    }
+
+    # Call without lot_size parameter (lot_size defaults to None)
+    ce, pe = calc.get_10_delta_strikes(
+        symbol="BTC",
+        target_delta=0.10,
+        expiry_date_str="241126",
+        target_lots=1000,
+        min_tradeable_lots=100,
+        enable_anti_trap=False,
+    )
+    assert ce is not None
+    assert ce["symbol"] == "C-BTC-70000-241126"
+    assert pe is not None
+    assert pe["symbol"] == "P-BTC-60000-241126"
+

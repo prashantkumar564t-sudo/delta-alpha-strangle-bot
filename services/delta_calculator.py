@@ -367,7 +367,8 @@ class DeltaCalculator:
                 continue
 
             # 5. Depth check: Ensure orderbook has sufficient buyers for requested lot size
-            if bid_size < float(lot_size):
+            required_depth = float(lot_size if lot_size is not None else min_tradeable_lots)
+            if bid_size < required_depth:
                 continue
 
             # Extract contract tick_size for precise stop-loss rounding
