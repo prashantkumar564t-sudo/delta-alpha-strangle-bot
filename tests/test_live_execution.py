@@ -62,8 +62,8 @@ def run_live_execution_test():
     )
     notifier.send_message(entry_start_msg)
 
-    # 2. Execute Entry & Attach 75% Bracket SL with Dual Verification
-    print("\n[STEP 2] Executing Market Sell + 10s Rest + 75% Bracket SL...")
+    # 2. Execute Entry & Attach 100% Combo A Bracket SL with Dual Verification
+    print("\n[STEP 2] Executing Market Sell + 10s Rest + 100% Combo A Bracket SL...")
     report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=1)
 
     if not report.get("success"):
@@ -82,10 +82,10 @@ def run_live_execution_test():
         "🛡️ *[LIVE TEST 2/4] BRACKET STOP-LOSS PLACED & VERIFIED*\n\n"
         f"🟢 *CALL LEG (CE):* `{ce['symbol']}`\n"
         f"• Executed Fill: `{ce_entry} USD`\n"
-        f"• 75% Bracket SL: `{ce_sl} USD` (Market Stop Active ✅)\n\n"
+        f"• 100% Combo A SL: `{ce_sl} USD` (Market Stop Active ✅)\n\n"
         f"🔴 *PUT LEG (PE):* `{pe['symbol']}`\n"
         f"• Executed Fill: `{pe_entry} USD`\n"
-        f"• 75% Bracket SL: `{pe_sl} USD` (Market Stop Active ✅)\n\n"
+        f"• 100% Combo A SL: `{pe_sl} USD` (Market Stop Active ✅)\n\n"
         "✅ Verified in Exchange Orderbook via Static Proxy!"
     )
     notifier.send_message(sl_verified_msg)

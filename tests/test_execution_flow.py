@@ -17,7 +17,7 @@ from services.order_manager import OrderManager
 
 
 def test_dry_run_pipeline():
-    """Verifies delta bounds and static 75% stop-loss tick-size rounding logic."""
+    """Verifies delta bounds and Combo A 100% stop-loss tick-size rounding logic."""
     client = DeltaApiClient("dummy_key", "dummy_secret", "https://cdn-ind.testnet.deltaex.org")
     order_mgr = OrderManager(client, default_leverage=DEFAULT_LEVERAGE)
 

@@ -231,3 +231,26 @@ class TelegramNotifier:
             f"• Net Realized PnL: `{net_sign}${net_pnl_usd:.2f} USD` (`{net_sign}₹{net_pnl_usd * inr_rate:,.2f}`)\n\n"
             "🛡️ *Account Status:* FLAT (All positions squared off | 0 overnight risk verified ✅)"
         )
+
+    @staticmethod
+    def format_crash_alert(
+        job_name: str,
+        timestamp_str: str,
+        exception_type: str,
+        exception_msg: str,
+        file_line: str,
+        short_traceback: str,
+    ) -> str:
+        """Crash Alert: Dispatched when unhandled exception occurs in main.py entrypoints."""
+        return (
+            "🚨🚨 *[DELTA BOT CRASH ALERT]* 🚨🚨\n\n"
+            f"🕒 *Timestamp:* `{timestamp_str}`\n"
+            f"⚙️ *Job:* `{job_name}`\n"
+            f"💥 *Error Type:* `{exception_type}`\n"
+            f"📍 *Location:* `{file_line}`\n"
+            f"📝 *Message:* `{exception_msg}`\n\n"
+            "```text\n"
+            f"{short_traceback}\n"
+            "```\n"
+            "⚡ Bot execution aborted safely (exit code 1)."
+        )

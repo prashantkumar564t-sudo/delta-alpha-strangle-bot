@@ -62,6 +62,11 @@ MIN_TRADEABLE_LOTS = int(os.getenv("MIN_TRADEABLE_LOTS", "100"))
 LOT_SIZE = TARGET_LOTS
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "40"))
 
+# Combo A Stop-Loss & Risk Management Parameters
+SL_MULTIPLIER = float(os.getenv("SL_MULTIPLIER", "2.00"))
+COST_TRAIL_MULTIPLIER = float(os.getenv("COST_TRAIL_MULTIPLIER", "1.00"))
+HARD_KILL_SWITCH_USD = float(os.getenv("HARD_KILL_SWITCH_USD", "1185.00"))
+
 # Telegram Notifications
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()

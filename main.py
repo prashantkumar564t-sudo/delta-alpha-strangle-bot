@@ -15,6 +15,7 @@ from config.settings import DEFAULT_LEVERAGE, LOT_SIZE, load_env
 load_env()
 
 from core.api_client import DeltaApiClient
+from services.telegram_notifier import TelegramNotifier
 
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 API_KEY = os.getenv("DELTA_API_KEY", "")
@@ -96,17 +97,38 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.action == "entry":
-        entry_mod = importlib.import_module("jobs.1_entry_job")
-        entry_mod.run()
-    elif args.action == "exit":
-        exit_mod = importlib.import_module("jobs.2_exit_job")
-        exit_mod.run()
-    elif args.action == "status":
-        show_status()
-    elif args.action == "monitor":
-        monitor_mod = importlib.import_module("jobs.3_monitor_job")
-        monitor_mod.run()
+    try:
+        if args.action == "entry":
+            entry_mod = importlib.import_module("jobs.1_entry_job")
+            entry_mod.run()
+        elif args.action == "exit":
+            exit_mod = importlib.import_module("jobs.2_exit_job")
+            exit_mod.run()
+        elif args.action == "status":
+            show_status()
+        elif args.action == "monitor":
+            monitor_mod = importlib.import_module("jobs.3_monitor_job")
+            monitor_mod.run()
+    except Exception as exc:
+        import traceback
+
+        tb = traceback.format_exc()
+        tb_lines = tb.strip().splitlines()
+        file_line = tb_lines[-2] if len(tb_lines) >= 2 else "Unknown Location"
+        short_tb = "\n".join(tb_lines[-8:])
+
+        notifier = TelegramNotifier()
+        crash_msg = TelegramNotifier.format_crash_alert(
+            job_name=f"main.py {args.action}",
+            timestamp_str=datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+            exception_type=type(exc).__name__,
+            exception_msg=str(exc),
+            file_line=file_line.strip(),
+            short_traceback=short_tb,
+        )
+        print("\n" + crash_msg, file=sys.stderr)
+        notifier.send_system_error(crash_msg)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

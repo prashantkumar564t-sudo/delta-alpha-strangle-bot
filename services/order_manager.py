@@ -5,15 +5,25 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from config.settings import TARGET_LOTS
+from config.settings import COST_TRAIL_MULTIPLIER, SL_MULTIPLIER, TARGET_LOTS
 from services.notifier import TelegramNotifier
 
 
 class OrderManager:
-    def __init__(self, api_client, default_leverage: int = 40):
+    def __init__(
+        self,
+        api_client,
+        default_leverage: int = 40,
+        sl_multiplier: float | None = None,
+        cost_trail_multiplier: float | None = None,
+    ):
         self.client = api_client
         self.notifier = TelegramNotifier()
         self.default_leverage = default_leverage
+        self.sl_multiplier = sl_multiplier if sl_multiplier is not None else SL_MULTIPLIER
+        self.cost_trail_multiplier = (
+            cost_trail_multiplier if cost_trail_multiplier is not None else COST_TRAIL_MULTIPLIER
+        )
 
     def set_leverage(self, product_id: int, leverage: int = 40) -> bool:
         """
@@ -57,7 +67,7 @@ class OrderManager:
         1. Executes CE and PE Market Sell orders with immediate cancellation audit.
         2. Pauses 10s for matching engine settlement.
         3. Fetches real positions table; triggers atomic rollback if asymmetric fill.
-        4. Attaches 75% pure market stop bracket orders with 3-attempt retry loop.
+        4. Attaches 100% pure market stop bracket orders (2.0x entry price) with 3-attempt retry loop.
         5. Pauses 10s for stop orderbook registration.
         6. Verifies bracket orders in open orderbook (/v2/orders?state=open).
         7. Sends confirmed Telegram execution alert.
@@ -169,8 +179,8 @@ class OrderManager:
         ce_tick = float(ce_info.get("tick_size") or 0.1)
         pe_tick = float(pe_info.get("tick_size") or 0.1)
 
-        raw_ce_sl = ce_entry * 2.00
-        raw_pe_sl = pe_entry * 2.00
+        raw_ce_sl = ce_entry * self.sl_multiplier
+        raw_pe_sl = pe_entry * self.sl_multiplier
 
         ce_sl_trigger = self._round_to_tick_size(raw_ce_sl, ce_tick)
         pe_sl_trigger = self._round_to_tick_size(raw_pe_sl, pe_tick)
@@ -560,7 +570,7 @@ class OrderManager:
         surviving_sym = surviving_leg_info.get("symbol", f"ID_{surviving_pid}")
         surviving_tick = float(surviving_leg_info.get("tick_size") or tick_size)
 
-        cost_sl_trigger = self._round_to_tick_size(surviving_entry_price, surviving_tick)
+        cost_sl_trigger = self._round_to_tick_size(surviving_entry_price * self.cost_trail_multiplier, surviving_tick)
         print(f"\n[COMBO A TRAIL] Moving surviving leg {surviving_sym} SL to entry cost: {cost_sl_trigger} USD...")
 
         # 1. Cancel previous SL order
@@ -601,10 +611,10 @@ class OrderManager:
         }
 
         # 3. Telegram notification
-        surviving_orig_sl = surviving_entry_price * 2.00
+        surviving_orig_sl = surviving_entry_price * self.sl_multiplier
         stopped_sym = f"{stopped_leg_name}_LEG"
         stopped_entry = surviving_entry_price
-        stopped_exit = stopped_entry * 2.0
+        stopped_exit = stopped_entry * self.sl_multiplier
 
         msg = TelegramNotifier.format_cost_trail_alert(
             date_str=datetime.now().strftime("%Y-%m-%d"),
@@ -710,8 +720,8 @@ class OrderManager:
         else:
             ce_entry = float(ce_data.get("entry_price") or 0.0)
             pe_entry = float(pe_data.get("entry_price") or 0.0)
-            ce_sl = float(ce_data.get("sl_trigger") or (ce_entry * 2.0))
-            pe_sl = float(pe_data.get("sl_trigger") or (pe_entry * 2.0))
+            ce_sl = float(ce_data.get("sl_trigger") or (ce_entry * self.sl_multiplier))
+            pe_sl = float(pe_data.get("sl_trigger") or (pe_entry * self.sl_multiplier))
 
             ce_cur = float(ce_pos.get("mark_price") or 0.0)
             pe_cur = float(pe_pos.get("mark_price") or 0.0)

@@ -15,6 +15,7 @@ load_env()
 from core.api_client import DeltaApiClient
 from services.notifier import TelegramNotifier
 from services.order_manager import OrderManager
+from services.risk_guard import RiskGuard
 
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 API_KEY = os.getenv("DELTA_API_KEY", "")
@@ -120,6 +121,28 @@ def run():
         turnover_usd = (ce_entry + ce_exit + pe_entry + pe_exit) * allocated_lots * 0.001
         fees_usd = turnover_usd * 0.0413
         net_pnl_usd = gross_pnl_usd - fees_usd
+
+        # Record financial realization to persistent ledger
+        ledger_path = os.path.join(ROOT_DIR, "data", "trade_ledger.csv")
+        RiskGuard.record_session_to_ledger(
+            ledger_path=ledger_path,
+            session_record={
+                "trade_date": trade_date,
+                "entry_time": state_data.get("entry_timestamp", ""),
+                "exit_time": datetime.now().isoformat(),
+                "outcome_type": outcome_type,
+                "ce_symbol": ce_sym,
+                "pe_symbol": pe_sym,
+                "allocated_lots": allocated_lots,
+                "ce_entry": ce_entry,
+                "ce_exit": ce_exit,
+                "pe_entry": pe_entry,
+                "pe_exit": pe_exit,
+                "gross_pnl_usd": round(gross_pnl_usd, 4),
+                "fees_usd": round(fees_usd, 4),
+                "net_pnl_usd": round(net_pnl_usd, 4),
+            },
+        )
 
         msg = TelegramNotifier.format_session_scorecard(
             date_str=trade_date,

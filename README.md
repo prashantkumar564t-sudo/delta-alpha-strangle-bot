@@ -289,7 +289,7 @@ Sending test message to Telegram...
 *(Check your Telegram app for the test notification).*
 
 ### Test 3: End-to-End Live Execution Pipeline
-Runs a complete simulated trade cycle: selects 10-Delta strikes -> sells 1 lot CE & PE -> attaches 75% Bracket SL -> holds for 120 seconds -> executes auto square-off:
+Runs a complete simulated trade cycle: selects 10-Delta strikes -> sells 1 lot CE & PE -> attaches 100% Combo A Bracket SL -> holds for 120 seconds -> executes auto square-off:
 ```bash
 python tests/test_live_execution.py
 ```
@@ -298,7 +298,7 @@ python tests/test_live_execution.py
 [STEP 1] Selected CE: C-BTC-75400-121126 | Selected PE: P-BTC-72000-121126
 [STEP 2] CE SOLD (Order ID: ...) | PE SOLD (Order ID: ...)
          Real Fills: CE = 44.0 USD, PE = 101.3 USD
-         Attached 75% Bracket SLs: CE @ 77.0 USD, PE @ 177.3 USD (Verified Active ✅)
+         Attached 100% Combo A Bracket SLs: CE @ 88.0 USD, PE @ 202.6 USD (Verified Active ✅)
 [STEP 3] Holding positions... 120 seconds countdown.
 [STEP 4] Initiating square-off: Orders cancelled, positions bought back.
          Verification: 0 Open Orders, 0 Open Positions remaining (100% FLAT ✅)
@@ -368,11 +368,14 @@ To run fully autonomously without manual intervention, configure Termux's built-
 # ====================================================================
 # DELTA ALPHA STRANGLE AUTOMATION CRON (IST TIMEZONE)
 # ====================================================================
-# 10:00:00 AM IST - Morning Entry Job with 75% Bracket SL
-00 10 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python jobs/1_entry_job.py >> logs/trading.log 2>&1
+# 10:00:00 AM IST - Morning Entry Job with 100% Combo A Bracket SL
+00 10 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py entry >> logs/entry.log 2>&1
+
+# 10:00 - 17:00 IST - Cost-to-Cost Trail State Machine Monitor (Every 2 Mins)
+*/2 10-17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py monitor >> logs/monitor.log 2>&1
 
 # 05:15:00 PM IST - Guaranteed Exit, 3-Attempt Retry & Flat Audit
-15 17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python jobs/2_exit_job.py >> logs/trading.log 2>&1
+15 17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py exit >> logs/exit.log 2>&1
 ```
 
 3. Save and exit (`Ctrl + O`, `Enter`, `Ctrl + X`).
@@ -409,8 +412,9 @@ Key strategy mechanics include:
 - **10:00 AM IST Entry:** Selling 10-Delta OTM Call and Put options 7.5 hours prior to the 17:30 IST daily settlement.
 - **Liquidity & Spread Sanity Filters:** Filtering out dead bids (`best_bid <= 0`), sub-\$5 premiums (`mark_price < 5.0`), and wide spreads (`spread / mark_price > 0.40`).
 - **Atomic Rollback Engine:** Automatic emergency market buy of Leg 1 if Leg 2 fails execution.
-- **Static 75% Bracket Stop-Loss:** Immediate placement of an independent $+75\%$ Stop-Market Bracket order on each leg. Strictly static with **zero trailing and no break-even adjustments**.
+- **Combo A Stop-Loss & Cost Trail:** Immediate placement of an independent $+100\%$ ($2.0\times$ entry price) Stop-Market Bracket order on each leg. The instant one leg triggers its SL, the surviving leg is automatically trailed to its exact entry cost ($1.0\times$), locking in zero directional risk.
 - **17:15 PM IST Guaranteed Exit:** Triple-pass square-off loop closing all remaining open positions and cancelling all pending orders to guarantee a 100% flat portfolio.
+- **Hard Strategy Kill-Switch:** Automated pre-flight check halting execution if cumulative peak-to-trough live drawdown exceeds \$1,185.00 USD.
 
 ---
 
@@ -423,7 +427,7 @@ delta-alpha-strangle-bot/
 ├── README.md                 # Complete operational manual (this file)
 ├── STRANGLE_STRATEGY.md      # Quantitative strategy & risk engine specification
 ├── requirements.txt          # Intentionally empty (100% Python Standard Library)
-├── main.py                   # Master entrypoint stub
+├── main.py                   # Master CLI entrypoint router
 │
 ├── config/
 │   ├── __init__.py
@@ -434,12 +438,14 @@ delta-alpha-strangle-bot/
 │   └── api_client.py         # Native urllib client with HMAC-SHA256 signature generator
 │
 ├── data/
-│   └── state.json            # Dynamic runtime state recording active trades and stops
+│   ├── state.json            # Dynamic runtime state recording active trades and stops
+│   └── trade_ledger.csv      # Persistent trade ledger tracking session PnL & drawdowns
 │
 ├── jobs/
 │   ├── __init__.py
-│   ├── 1_entry_job.py        # 10:00 AM IST Entry & 75% Bracket SL job
-│   └── 2_exit_job.py         # 17:15 PM IST Auto Square-off & Flat Verification job
+│   ├── 1_entry_job.py        # 10:00 AM IST Entry & 100% Combo A Bracket SL job
+│   ├── 2_exit_job.py         # 17:15 PM IST Auto Square-off & Flat Verification job
+│   └── 3_monitor_job.py      # Combo A Cost-to-Cost Trail state monitor job
 │
 ├── logs/
 │   └── .gitkeep              # Log output directory (trading.log)

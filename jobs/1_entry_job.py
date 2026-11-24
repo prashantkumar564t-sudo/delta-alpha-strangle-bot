@@ -8,7 +8,15 @@ from datetime import datetime
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
 
-from config.settings import DEFAULT_LEVERAGE, MIN_TRADEABLE_LOTS, TARGET_LOTS, load_env
+from config.settings import (
+    COST_TRAIL_MULTIPLIER,
+    DEFAULT_LEVERAGE,
+    HARD_KILL_SWITCH_USD,
+    MIN_TRADEABLE_LOTS,
+    SL_MULTIPLIER,
+    TARGET_LOTS,
+    load_env,
+)
 
 load_env()
 
@@ -16,6 +24,7 @@ from core.api_client import DeltaApiClient
 from services.delta_calculator import DeltaCalculator
 from services.notifier import TelegramNotifier
 from services.order_manager import OrderManager
+from services.risk_guard import RiskGuard
 
 BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
 API_KEY = os.getenv("DELTA_API_KEY", "")
@@ -30,7 +39,34 @@ def run():
     notifier = TelegramNotifier()
     client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
     calc = DeltaCalculator(client)
-    order_mgr = OrderManager(client, default_leverage=DEFAULT_LEVERAGE)
+    order_mgr = OrderManager(
+        client,
+        default_leverage=DEFAULT_LEVERAGE,
+        sl_multiplier=SL_MULTIPLIER,
+        cost_trail_multiplier=COST_TRAIL_MULTIPLIER,
+    )
+
+    # ------------------------------------------------------------------
+    # PRE-FLIGHT RISK GATE: HARD STRATEGY KILL-SWITCH ($1,185 MDD Barrier)
+    # ------------------------------------------------------------------
+    ledger_path = os.path.join(ROOT_DIR, "data", "trade_ledger.csv")
+    is_breached, current_dd, reason = RiskGuard.check_hard_kill_switch(
+        max_drawdown_limit=HARD_KILL_SWITCH_USD,
+        ledger_path=ledger_path,
+    )
+    if is_breached:
+        kill_alert = (
+            "🚨🚨 *[HARD STRATEGY KILL-SWITCH TRIGGERED]* 🚨🚨\n\n"
+            f"🕒 *Timestamp:* `{datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}`\n"
+            f"🛑 *Live Drawdown:* `-${current_dd:.2f} USD` (Limit: `-${HARD_KILL_SWITCH_USD:.2f} USD`)\n"
+            "🛡️ *Action:* 10:00 AM Entry HALTED automatically to preserve capital.\n"
+            f"📋 *Details:* {reason}\n\n"
+            "👉 *Please review strategy performance ledger before resuming live execution.*"
+        )
+        print(f"\n[KILL-SWITCH HALT] {reason}")
+        print(kill_alert)
+        notifier.send_system_error(kill_alert)
+        return
 
     target_lots = TARGET_LOTS
     min_tradeable_lots = MIN_TRADEABLE_LOTS
@@ -75,7 +111,8 @@ def run():
         "target_lots": target_lots,
         "allocated_lots": final_lots,
         "sizing_msg": sizing_msg,
-        "sl_multiplier": 2.00,
+        "sl_multiplier": SL_MULTIPLIER,
+        "cost_trail_multiplier": COST_TRAIL_MULTIPLIER,
         "trail_status": "ARMED",
         "product_ids": [ce["id"], pe["id"]],
         "ce": report["ce"],
