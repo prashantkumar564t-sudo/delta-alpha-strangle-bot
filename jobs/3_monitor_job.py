@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime
@@ -19,14 +20,47 @@ API_KEY = os.getenv("DELTA_API_KEY", "")
 API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
 
-def run():
+def run() -> None:
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Fast Pre-Flight Check (Zero-Proxy Bandwidth Guard):
+    # Exit immediately with 0 network calls if strategy is flat, inactive, or already trailed/closed.
+    state_file = os.path.join(ROOT_DIR, "data", "state.json")
+    if not os.path.exists(state_file):
+        print(f"[{now_str}] [MONITOR FAST-EXIT] No data/state.json found (Flat/Idle). 0 proxy calls consumed.")
+        return
+
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state_data = json.load(f)
+    except Exception as e:
+        print(f"[{now_str}] [MONITOR WARN] Error reading state.json: {e}")
+        return
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if state_data.get("trade_date") and state_data.get("trade_date") != today_str:
+        print(
+            f"[{now_str}] [MONITOR FAST-EXIT] state.json date ({state_data.get('trade_date')}) is not today ({today_str}). 0 proxy calls consumed."
+        )
+        return
+
+    if state_data.get("status") in ("CLOSED", "FAILED_EXIT"):
+        print(f"[{now_str}] [MONITOR FAST-EXIT] Strategy status is {state_data.get('status')}. 0 proxy calls consumed.")
+        return
+
+    if state_data.get("trail_status") in ("TRAILED", "BOTH_CLOSED"):
+        print(
+            f"[{now_str}] [MONITOR FAST-EXIT] trail_status is {state_data.get('trail_status')} (Bracket SL active on exchange). 0 proxy calls consumed."
+        )
+        return
+
     print("\n========================================================")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] RUNNING JOB 3: COMBO A COST TRAIL MONITOR")
+    print(f"[{now_str}] RUNNING JOB 3: COMBO A COST TRAIL MONITOR (ACTIVE POSITION)")
     print("========================================================")
 
     client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
     order_mgr = OrderManager(client)
-    res = order_mgr.monitor_and_update_cost_trail()
+    res = order_mgr.monitor_and_update_cost_trail(state_file_path=state_file)
     print(f"[MONITOR RESULT] Status: {res.get('status')} | Details: {res.get('message', res)}")
     print("[FINISHED] Monitor job execution complete.\n")
 

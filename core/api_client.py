@@ -186,6 +186,17 @@ class DeltaApiClient:
         """
         parsed = urllib.parse.urlsplit(full_path)
         path = parsed.path
-        if method == "GET" and path.startswith(("/v2/products", "/v2/tickers")):
+        public_endpoints = (
+            "/v2/products",
+            "/v2/tickers",
+            "/v2/l2orderbook",
+            "/v2/orderbook",
+            "/v2/indices",
+            "/v2/underlying-prices",
+            "/v2/settlement-prices",
+            "/v2/assets",
+            "/v2/depth",
+        )
+        if method == "GET" and path.startswith(public_endpoints):
             return self.request_public(method, full_path)
         return self.request_private(method, full_path, payload)

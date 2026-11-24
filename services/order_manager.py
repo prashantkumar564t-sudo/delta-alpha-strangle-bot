@@ -657,8 +657,15 @@ class OrderManager:
         if state_data.get("status") in ("CLOSED", "FAILED_EXIT"):
             return {"status": state_data.get("status"), "message": "Strategy already closed"}
 
-        if state_data.get("trail_status") == "TRAILED":
-            return {"status": "ALREADY_TRAILED", "message": "Surviving leg already trailed to cost"}
+        if state_data.get("trail_status") in ("TRAILED", "BOTH_CLOSED"):
+            return {"status": "ALREADY_TRAILED", "message": f"Surviving leg state is {state_data.get('trail_status')}"}
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if state_data.get("trade_date") and state_data.get("trade_date") != today_str:
+            return {
+                "status": "STALE_DATE",
+                "message": f"state.json date {state_data.get('trade_date')} does not match today {today_str}",
+            }
 
         ce_data = state_data.get("ce", {})
         pe_data = state_data.get("pe", {})
