@@ -18,8 +18,10 @@ from config.settings import (
     ENTRY_WINDOW_SECONDS,
     EXECUTION_HOUR,
     EXECUTION_MINUTE,
+    FULL_TARGET_WAIT_SECONDS,
     HARD_KILL_SWITCH_USD,
     MAX_SPREAD_RATIO,
+    MIN_FALLBACK_LOTS,
     MIN_TRADEABLE_LOTS,
     SL_MULTIPLIER,
     TARGET_LOTS,
@@ -63,6 +65,47 @@ def check_drawdown_warning(notifier: TelegramNotifier) -> tuple[bool, float, str
     return is_breached, current_dd, reason
 
 
+def _send_phase1_telemetry(
+    notifier: TelegramNotifier,
+    ce: dict[str, Any],
+    pe: dict[str, Any],
+    now_fn: Any,
+    target_lots: int = TARGET_LOTS,
+    is_relock: bool = False,
+) -> None:
+    """Helper to dispatch Phase 1 target-lock telemetry to Telegram (DM only)."""
+    ce_mark = float(ce.get("mark_price") or 1.0)
+    ce_ask = float(ce.get("best_ask") or 0.0)
+    ce_bid = float(ce.get("best_bid") or 0.0)
+    ce_spread_pct = ((ce_ask - ce_bid) / ce_mark * 100.0) if ce_mark > 0 and ce_ask > 0 else 0.0
+
+    pe_mark = float(pe.get("mark_price") or 1.0)
+    pe_ask = float(pe.get("best_ask") or 0.0)
+    pe_bid = float(pe.get("best_bid") or 0.0)
+    pe_spread_pct = ((pe_ask - pe_bid) / pe_mark * 100.0) if pe_mark > 0 and pe_ask > 0 else 0.0
+
+    alert_msg = TelegramNotifier.format_phase1_warmup_alert(
+        date_str=now_fn().strftime("%Y-%m-%d"),
+        time_str=now_fn().strftime("%H:%M:%S"),
+        ce_symbol=ce.get("symbol", "N/A"),
+        ce_strike=float(ce.get("strike_price") or 0.0),
+        ce_delta=float(ce.get("delta") or 0.0),
+        ce_mark=ce_mark,
+        ce_bid_depth=float(ce.get("bid_size") or 0.0),
+        ce_spread_pct=ce_spread_pct,
+        pe_symbol=pe.get("symbol", "N/A"),
+        pe_strike=float(pe.get("strike_price") or 0.0),
+        pe_delta=float(pe.get("delta") or 0.0),
+        pe_mark=pe_mark,
+        pe_bid_depth=float(pe.get("bid_size") or 0.0),
+        pe_spread_pct=pe_spread_pct,
+        target_lots=target_lots,
+        is_relock=is_relock,
+    )
+    print("\n" + alert_msg + "\n")
+    notifier.send_message(alert_msg, is_trade_alert=False)
+
+
 def run_phase1_warmup(
     calc: DeltaCalculator,
     notifier: TelegramNotifier,
@@ -72,8 +115,9 @@ def run_phase1_warmup(
     """
     Phase 1: 09:58:00 to 09:59:59 IST — Warm-Up & Target Lock
     - Scans 0DTE option chain, locks 0.10 Delta CE & PE strikes in memory.
+    - Sends Telegram pre-warm telemetry alert.
     - Polls locked strikes every 5s until 10:00:00 IST (zero orders placed).
-    - Dynamically re-locks if delta drifts outside [0.07, 0.13].
+    - Dynamically re-locks and alerts if delta drifts outside [0.07, 0.13].
     """
     print("\n========================================================")
     print(f"[{now_fn().strftime('%Y-%m-%d %H:%M:%S')}] PHASE 1: 09:58 IST WARM-UP & TARGET LOCK")
@@ -91,6 +135,7 @@ def run_phase1_warmup(
         f"🔒 [PHASE 1 LOCKED] CE: {locked_ce['symbol']} (Delta: {locked_ce['delta']:.4f}) | "
         f"PE: {locked_pe['symbol']} (Delta: {locked_pe['delta']:.4f})"
     )
+    _send_phase1_telemetry(notifier, locked_ce, locked_pe, now_fn, is_relock=False)
 
     while now_fn() < exec_target:
         remaining_sec = (exec_target - now_fn()).total_seconds()
@@ -124,6 +169,7 @@ def run_phase1_warmup(
                     f"🔒 [PHASE 1 RE-LOCKED] New CE: {locked_ce['symbol']} (Delta: {locked_ce['delta']:.4f}) | "
                     f"New PE: {locked_pe['symbol']} (Delta: {locked_pe['delta']:.4f})"
                 )
+                _send_phase1_telemetry(notifier, locked_ce, locked_pe, now_fn, is_relock=True)
         else:
             print(
                 f"[PHASE 1 TRACKING | {now_fn().strftime('%H:%M:%S')}] "
@@ -158,19 +204,26 @@ def run_phase2_sniper_execution(
     min_tradeable_lots = MIN_TRADEABLE_LOTS
     max_window_sec = ENTRY_WINDOW_SECONDS
     poll_interval = ENTRY_RETRY_INTERVAL_SECONDS
+    full_wait_sec = FULL_TARGET_WAIT_SECONDS
+    min_fallback = MIN_FALLBACK_LOTS
     max_attempts = max(1, max_window_sec // poll_interval)
 
     print(
-        f"\n[1/3] Starting Smart {max_window_sec}s Sniper Window "
-        f"(Target: {target_lots} lots [1.0 BTC], Min Floor: {min_tradeable_lots} lots, Max Spread: {MAX_SPREAD_RATIO:.1%}, "
-        f"Polling every {poll_interval}s, max {max_attempts} attempts)..."
+        f"\n[1/3] Starting 2-Stage Sniper Window ({max_window_sec}s total): "
+        f"Stage 1 (0-{full_wait_sec}s: Full {target_lots} lots / 1.0 BTC) -> "
+        f"Stage 2 ({full_wait_sec}-{max_window_sec}s: Dynamic Equal-Leg Fallback >= {min_fallback} lots) | "
+        f"Max Spread: {MAX_SPREAD_RATIO:.1%}, Polling every {poll_interval}s, max {max_attempts} attempts..."
     )
 
     ce, pe = None, None
     start_time = time.time()
     for attempt in range(1, max_attempts + 1):
         elapsed_sec = int(time.time() - start_time)
-        print(f"\n[POLL ATTEMPT {attempt}/{max_attempts} | Elapsed: {elapsed_sec}s / {max_window_sec}s]")
+        is_stage1 = elapsed_sec < full_wait_sec
+        stage_desc = (
+            f"STAGE 1 (FULL {target_lots} LOTS)" if is_stage1 else f"STAGE 2 (DYNAMIC FALLBACK >= {min_fallback} LOTS)"
+        )
+        print(f"\n[POLL ATTEMPT {attempt}/{max_attempts} | Elapsed: {elapsed_sec}s / {max_window_sec}s | {stage_desc}]")
 
         is_last_attempt = attempt == max_attempts
 
@@ -184,11 +237,20 @@ def run_phase2_sniper_execution(
             suppress_block_alert=(not is_last_attempt),
             locked_ce=locked_ce,
             locked_pe=locked_pe,
+            require_full_target=is_stage1,
+            min_fallback_lots=min_fallback,
         )
 
         if ce and pe:
+            final_lots = int(ce.get("allocated_lots", target_lots))
+            exec_mode = (
+                f"FULL ALLOCATION ({final_lots} lots / 1.0 BTC)"
+                if final_lots >= target_lots
+                else f"STAGE 2 DYNAMIC EQUAL-LEG FALLBACK ({final_lots} lots)"
+            )
             print(
-                f"✅ [SNIPER EXECUTION LOCKED] Qualifying 10-Delta strikes cleared all liquidity barriers on attempt {attempt} (Elapsed: {elapsed_sec}s)!"
+                f"✅ [SNIPER EXECUTION LOCKED] Qualifying 10-Delta strikes cleared all liquidity barriers on attempt {attempt} "
+                f"(Elapsed: {elapsed_sec}s | Mode: {exec_mode})!"
             )
             break
 
@@ -213,7 +275,9 @@ def run_phase2_sniper_execution(
     print(
         f"\n[2/3] Setting {DEFAULT_LEVERAGE}x Leverage + Executing Market Sell (Size: {final_lots} lots) + 100% Combo A Bracket SL..."
     )
-    report = order_mgr.execute_strangle_with_dual_verification(ce_info=ce, pe_info=pe, size=final_lots)
+    report = order_mgr.execute_strangle_with_dual_verification(
+        ce_info=ce, pe_info=pe, size=final_lots, fill_delay_sec=elapsed_sec
+    )
 
     if not report.get("success"):
         print("\n❌ Entry or Bracket SL execution failed.")
@@ -233,6 +297,8 @@ def run_phase2_sniper_execution(
             "strategy": "COMBO_A",
             "target_lots": target_lots,
             "allocated_lots": final_lots,
+            "fill_delay_seconds": elapsed_sec,
+            "stage": "STAGE_1_FULL" if final_lots >= target_lots else "STAGE_2_DYNAMIC_FALLBACK",
             "sizing_msg": sizing_msg,
             "sl_multiplier": SL_MULTIPLIER,
             "cost_trail_multiplier": COST_TRAIL_MULTIPLIER,

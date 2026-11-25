@@ -102,37 +102,58 @@ class DeltaCalculator:
         put_bid_size: float,
         target_lots: int = 1000,
         min_tradeable_lots: int = 100,
+        require_full_target: bool = False,
+        min_fallback_lots: int = 100,
     ) -> tuple[int, str]:
         """
-        20% L1 Footprint Rule for Dynamic Liquidity-Aware Sizing:
-        - effective_min = min(target_lots, min_tradeable_lots)
+        2-Stage Dynamic Liquidity-Aware Sizing (20% L1 Footprint Rule):
         - safe_call_lots = min(target_lots, int(call_bid_size * 0.20))
         - safe_put_lots = min(target_lots, int(put_bid_size * 0.20))
-        - final_lots = min(safe_call_lots, safe_put_lots)
-        Blocks trade if final_lots < effective_min.
+        - equal_lots = min(safe_call_lots, safe_put_lots)
+
+        Stage 1 (require_full_target=True, 0s to 90s):
+        - Requires equal_lots >= target_lots (full 1,000 lots / 1.0 BTC).
+        - If equal_lots < target_lots, returns (equal_lots, wait_msg) to wait for MM depth.
+
+        Stage 2 (require_full_target=False, 90s to 120s):
+        - Dynamic Equal-Leg Fallback: executes equal_lots if equal_lots >= min_fallback_lots.
+        - Blocks trade only if equal_lots < effective_min (min_fallback_lots).
         """
-        effective_min = min(target_lots, min_tradeable_lots)
+        effective_min = min(target_lots, max(min_tradeable_lots, min_fallback_lots))
         safe_call = min(target_lots, int(float(call_bid_size) * 0.20))
         safe_put = min(target_lots, int(float(put_bid_size) * 0.20))
-        final_lots = min(safe_call, safe_put)
+        equal_lots = min(safe_call, safe_put)
 
-        if final_lots < effective_min:
+        if require_full_target:
+            if equal_lots < target_lots:
+                limiting_leg = "Call" if safe_call < safe_put else ("Put" if safe_put < safe_call else "Both")
+                limiting_depth = call_bid_size if limiting_leg == "Call" else put_bid_size
+                msg = (
+                    f"Stage 1 Patience: L1 depth yields {equal_lots} < target {target_lots} lots "
+                    f"({limiting_leg} depth: {limiting_depth:,.0f}). Waiting for full allocation..."
+                )
+                return equal_lots, msg
+            msg = f"Stage 1 Full Target: {equal_lots} / {target_lots} lots (1.0 BTC)"
+            return equal_lots, msg
+
+        # Stage 2 Dynamic Fallback
+        if equal_lots < effective_min:
             min_depth_seen = min(float(call_bid_size), float(put_bid_size))
             required_depth = effective_min * 5
             msg = (
-                f"Blocked: Safe executable lots ({final_lots}) below MIN_TRADEABLE_LOTS ({effective_min}). "
+                f"Blocked: Safe executable lots ({equal_lots}) below MIN_TRADEABLE_LOTS ({effective_min}). "
                 f"L1 Bid Depth (Call: {call_bid_size:.0f}, Put: {put_bid_size:.0f}, min: {min_depth_seen:.0f}) < {required_depth} required."
             )
-            return final_lots, msg
+            return equal_lots, msg
 
-        if final_lots < target_lots:
+        if equal_lots < target_lots:
             limiting_leg = "Call" if safe_call < safe_put else ("Put" if safe_put < safe_call else "Both")
             limiting_depth = call_bid_size if limiting_leg == "Call" else put_bid_size
-            msg = f"Adjusted Lots: {final_lots} / {target_lots} due to L1 Bid Depth = {limiting_depth:,.0f}"
+            msg = f"Adjusted Lots: {equal_lots} / {target_lots} (Stage 2 Dynamic Fallback: Equal {equal_lots} lots on both legs due to {limiting_leg} L1 Depth = {limiting_depth:,.0f})"
         else:
-            msg = f"Full allocation: {final_lots} / {target_lots} lots (L1 Bid Depth >= {target_lots * 5:,} lots)"
+            msg = f"Full allocation: {equal_lots} / {target_lots} lots (L1 Bid Depth >= {target_lots * 5:,} lots)"
 
-        return final_lots, msg
+        return equal_lots, msg
 
     def check_anti_trap_liquidity(
         self,
@@ -490,6 +511,8 @@ class DeltaCalculator:
         suppress_block_alert: bool = False,
         locked_ce: dict[str, Any] | None = None,
         locked_pe: dict[str, Any] | None = None,
+        require_full_target: bool = False,
+        min_fallback_lots: int = 100,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """
         Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
@@ -541,13 +564,19 @@ class DeltaCalculator:
                 put_bid_size=best_pe["bid_size"],
                 target_lots=target_lots,
                 min_tradeable_lots=min_tradeable_lots,
+                require_full_target=require_full_target,
+                min_fallback_lots=min_fallback_lots,
             )
             best_ce["allocated_lots"] = final_lots
             best_pe["allocated_lots"] = final_lots
             best_ce["sizing_msg"] = sizing_msg
             best_pe["sizing_msg"] = sizing_msg
 
-            effective_min = min(target_lots, min_tradeable_lots)
+            if require_full_target and final_lots < target_lots:
+                print(f"[STAGE 1 PATIENCE] {sizing_msg}")
+                return None, None
+
+            effective_min = min(target_lots, max(min_tradeable_lots, min_fallback_lots))
             if final_lots < effective_min:
                 print(f"[ANTI-TRAP BLOCKED] Sizing below threshold: {sizing_msg}")
                 if not suppress_block_alert:

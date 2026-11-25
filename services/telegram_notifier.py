@@ -86,6 +86,48 @@ class TelegramNotifier:
     # =========================================================================
 
     @staticmethod
+    def format_phase1_warmup_alert(
+        date_str: str,
+        time_str: str,
+        ce_symbol: str,
+        ce_strike: float,
+        ce_delta: float,
+        ce_mark: float,
+        ce_bid_depth: float,
+        ce_spread_pct: float,
+        pe_symbol: str,
+        pe_strike: float,
+        pe_delta: float,
+        pe_mark: float,
+        pe_bid_depth: float,
+        pe_spread_pct: float,
+        target_lots: int = 1000,
+        is_relock: bool = False,
+    ) -> str:
+        """Template: Phase 1 (09:58 IST) Pre-Warm & Target Lock Telemetry."""
+        title = (
+            "🔒 *[PHASE 1 TARGET RE-LOCKED — DELTA DRIFT DETECTED]*"
+            if is_relock
+            else "🔒 *[PHASE 1 PRE-WARM — TARGET STRIKES LOCKED]*"
+        )
+        return (
+            f"{title}\n\n"
+            f"🕒 *Session:* `{date_str} | {time_str} IST`\n"
+            "🎯 *Objective:* `10-Delta Intraday Strangle Pre-Flight`\n\n"
+            f"🟢 *LOCKED CALL (CE):*\n"
+            f"• Contract: `{ce_symbol}` (Strike: `${ce_strike:,.0f}`)\n"
+            f"• Greek Delta: `{ce_delta:+.4f}` | Mark: `${ce_mark:.2f} USD`\n"
+            f"• L1 Top Bid Depth: `{ce_bid_depth:,.0f} lots` | Spread: `{ce_spread_pct:.2f}%`\n\n"
+            f"🔴 *LOCKED PUT (PE):*\n"
+            f"• Contract: `{pe_symbol}` (Strike: `${pe_strike:,.0f}`)\n"
+            f"• Greek Delta: `{pe_delta:+.4f}` | Mark: `${pe_mark:.2f} USD`\n"
+            f"• L1 Top Bid Depth: `{pe_bid_depth:,.0f} lots` | Spread: `{pe_spread_pct:.2f}%`\n\n"
+            "⚡ *Phase 2 Schedule:* Sniper Execution armed for `10:00:00 IST`\n"
+            f"🎯 *Target Size:* `{target_lots:,} lots` ({target_lots * 0.001:.3f} BTC)\n"
+            "🛡️ *Status:* Tracking orderbook every 5s | 0 Orders Placed ✅"
+        )
+
+    @staticmethod
     def format_entry_alert(
         date_str: str,
         time_str: str,
@@ -104,13 +146,17 @@ class TelegramNotifier:
         pe_bid_depth: float,
         pe_spread_pct: float,
         total_credit: float,
+        fill_delay_sec: int | None = None,
     ) -> str:
         """Template 1: Strangle Entry Executed."""
-        downsizing_line = (
-            f"• ⚡ *20% L1 Downsizing:* `{sizing_msg}`\n"
-            if allocated_lots < target_lots or "Downsizing" in sizing_msg
-            else "• Sizing Status: `Full Target Allocation ✅`\n"
-        )
+        delay_str = f" (Fill Delay: `{fill_delay_sec}s`)" if fill_delay_sec is not None else ""
+        if allocated_lots >= target_lots:
+            sizing_line = f"• Sizing Status: `Full Target Allocation ({allocated_lots:,} lots = {allocated_lots * 0.001:.3f} BTC) ✅`{delay_str}\n"
+        else:
+            sizing_line = (
+                f"• ⚡ *20% L1 Downsizing (Stage 2 Dynamic Fallback):* Equal {allocated_lots:,} lots ({allocated_lots * 0.001:.3f} BTC){delay_str}\n"
+                f"• 📋 *Detail:* `{sizing_msg}`\n"
+            )
         total_credit_str = f"+${total_credit:.2f} USD ({allocated_lots * 0.001:.3f} BTC)"
 
         return (
@@ -120,7 +166,7 @@ class TelegramNotifier:
             f"📊 *EXECUTION SIZING:*\n"
             f"• Target: `{target_lots:,} lots` ({target_lots * 0.001:.3f} BTC)\n"
             f"• Allocated: `{allocated_lots:,} lots` ({allocated_lots * 0.001:.3f} BTC)\n"
-            f"{downsizing_line}\n"
+            f"{sizing_line}\n"
             f"🟢 *CALL LEG (CE):*\n"
             f"• Strike: `{ce_symbol}`\n"
             f"• Sold @: `${ce_entry_price:.2f} USD`\n"

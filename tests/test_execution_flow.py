@@ -321,7 +321,11 @@ def test_smart_entry_retry_loop_recovers_after_micro_bid(
     # Verify get_10_delta_strikes was called twice
     assert mock_get_strikes.call_count == 2
     # Verify execute_strangle_with_dual_verification was called with 1000 lots
-    mock_execute.assert_called_once_with(ce_info=mock_ce, pe_info=mock_pe, size=1000)
+    mock_execute.assert_called_once()
+    call_kw = mock_execute.call_args[1]
+    assert call_kw["ce_info"] == mock_ce
+    assert call_kw["pe_info"] == mock_pe
+    assert call_kw["size"] == 1000
     # Verify skip message was NOT sent
     for call in mock_send_telegram.call_args_list:
         assert "JOB 1 SKIPPED" not in call[0][0]
@@ -402,6 +406,14 @@ def test_phase1_warmup_target_lock_and_drift_relock():
     assert locked_pe["id"] == 102
     # 3. Verify sleep was invoked for polling
     assert mock_now() >= datetime(2026, 11, 25, 10, 0, 0)
+    # 4. Verify Phase 1 Telegram telemetry was dispatched (initial lock + re-lock)
+    assert mock_notifier.send_message.call_count == 2
+    first_msg = mock_notifier.send_message.call_args_list[0][0][0]
+    assert "PHASE 1 PRE-WARM" in first_msg
+    assert "C-BTC-70000" in first_msg
+    second_msg = mock_notifier.send_message.call_args_list[1][0][0]
+    assert "PHASE 1 TARGET RE-LOCKED" in second_msg
+    assert "C-BTC-71000" in second_msg
 
 
 @patch("time.sleep", return_value=None)
@@ -433,4 +445,133 @@ def test_phase2_sniper_execution_uses_prelocked_targets(
     # Verify get_10_delta_strikes was called with locked_ce and locked_pe (None when entering at 10:00 directly)
     assert mock_get_strikes.call_count == 1
     # Verify execute_strangle was executed with 1,000 lots (1.0 BTC)
-    mock_execute.assert_called_once_with(ce_info=prelocked_ce, pe_info=prelocked_pe, size=1000)
+    mock_execute.assert_called_once()
+    call_kw = mock_execute.call_args[1]
+    assert call_kw["ce_info"] == prelocked_ce
+    assert call_kw["pe_info"] == prelocked_pe
+    assert call_kw["size"] == 1000
+
+
+def test_phase1_telegram_alert_formatting():
+    """Verifies Phase 1 target-lock telemetry alert formatting."""
+    from services.telegram_notifier import TelegramNotifier
+
+    msg = TelegramNotifier.format_phase1_warmup_alert(
+        date_str="2026-11-25",
+        time_str="09:58:00",
+        ce_symbol="C-BTC-70000-251126",
+        ce_strike=70000.0,
+        ce_delta=0.1012,
+        ce_mark=32.50,
+        ce_bid_depth=6200.0,
+        ce_spread_pct=4.62,
+        pe_symbol="P-BTC-60000-251126",
+        pe_strike=60000.0,
+        pe_delta=-0.0985,
+        pe_mark=28.00,
+        pe_bid_depth=5800.0,
+        pe_spread_pct=5.35,
+        target_lots=1000,
+        is_relock=False,
+    )
+
+    assert "PHASE 1 PRE-WARM — TARGET STRIKES LOCKED" in msg
+    assert "C-BTC-70000-251126" in msg
+    assert "P-BTC-60000-251126" in msg
+    assert "+0.1012" in msg
+    assert "-0.0985" in msg
+    assert "6,200 lots" in msg
+    assert "`1,000 lots` (1.000 BTC)" in msg
+    assert "Sniper Execution armed for `10:00:00 IST`" in msg
+
+
+@patch("time.sleep", return_value=None)
+@patch("services.order_manager.OrderManager.execute_strangle_with_dual_verification")
+@patch("services.delta_calculator.DeltaCalculator.get_10_delta_strikes")
+@patch("services.risk_guard.RiskGuard.check_hard_kill_switch", return_value=(False, 0.0, "OK"))
+def test_two_stage_patience_and_fallback_execution(
+    mock_kill_switch,
+    mock_get_strikes,
+    mock_execute,
+    _mock_sleep,
+):
+    """
+    Verifies Two-Stage Patience + Fallback:
+    - Stage 1 (< 90s): waits when only 700 lots available (requires full 1,000 lots).
+    - Stage 2 (>= 90s): executes equal 700 lots on both legs when depth >= 500 lots.
+    """
+    import importlib
+    from datetime import datetime
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    # In Stage 1 (<90s), returns (None, None); In Stage 2 (>=90s), returns 700 lots
+    ce_700 = {"id": 101, "symbol": "C-BTC-70000", "allocated_lots": 700, "sizing_msg": "Fallback 700"}
+    pe_700 = {"id": 102, "symbol": "P-BTC-60000", "allocated_lots": 700, "sizing_msg": "Fallback 700"}
+
+    # Mock side_effect: first 2 calls (during Stage 1) return (None, None); 3rd call (at 95s) returns 700 lots
+    mock_get_strikes.side_effect = [
+        (None, None),
+        (None, None),
+        (ce_700, pe_700),
+    ]
+    mock_execute.return_value = {"success": True, "ce": {}, "pe": {}}
+
+    # Simulated elapsed times: 0s, 45s, 95s
+    times = [0.0, 0.0, 45.0, 95.0, 95.0]
+    time_iter = iter(times)
+
+    with (
+        patch("time.time", side_effect=lambda: next(time_iter, 95.0)),
+        patch.object(entry_job, "FULL_TARGET_WAIT_SECONDS", 90),
+        patch.object(entry_job, "MIN_FALLBACK_LOTS", 500),
+    ):
+        now_10am = datetime(2026, 11, 25, 10, 0, 0)
+        res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
+
+    assert res is True
+    # Verify get_10_delta_strikes called 3 times
+    assert mock_get_strikes.call_count == 3
+    # Check calls kwargs: calls 1 & 2 have require_full_target=True, call 3 has require_full_target=False
+    call1_kwargs = mock_get_strikes.call_args_list[0][1]
+    call2_kwargs = mock_get_strikes.call_args_list[1][1]
+    call3_kwargs = mock_get_strikes.call_args_list[2][1]
+    assert call1_kwargs["require_full_target"] is True
+    assert call2_kwargs["require_full_target"] is True
+    assert call3_kwargs["require_full_target"] is False
+    assert call3_kwargs["min_fallback_lots"] == 500
+    # Verify execution happened with equal 700 lots
+    mock_execute.assert_called_once_with(ce_info=ce_700, pe_info=pe_700, size=700, fill_delay_sec=95)
+
+
+@patch("time.sleep", return_value=None)
+@patch("services.order_manager.OrderManager.execute_strangle_with_dual_verification")
+@patch("services.delta_calculator.DeltaCalculator.get_10_delta_strikes", return_value=(None, None))
+@patch("services.risk_guard.RiskGuard.check_hard_kill_switch", return_value=(False, 0.0, "OK"))
+@patch("services.notifier.TelegramNotifier.send_message")
+def test_stage2_skips_when_depth_below_500_lots(
+    mock_send_telegram,
+    mock_kill_switch,
+    mock_get_strikes,
+    mock_execute,
+    _mock_sleep,
+):
+    """Verifies that if depth yields < 500 lots throughout 120s window, execution is safely skipped."""
+    import importlib
+    from datetime import datetime
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    with (
+        patch.object(entry_job, "ENTRY_WINDOW_SECONDS", 10),
+        patch.object(entry_job, "ENTRY_RETRY_INTERVAL_SECONDS", 5),
+    ):
+        now_10am = datetime(2026, 11, 25, 10, 0, 0)
+        res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
+
+    assert res is False
+    # Execute should never be called
+    mock_execute.assert_not_called()
+    # Skip alert must be sent
+    assert mock_send_telegram.call_count >= 1
+    assert "JOB 1 SKIPPED" in mock_send_telegram.call_args[0][0]

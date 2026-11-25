@@ -63,6 +63,7 @@ class OrderManager:
         ce_info: dict[str, Any],
         pe_info: dict[str, Any],
         size: int = 1,
+        fill_delay_sec: int | None = None,
     ) -> dict[str, Any]:
         """
         0. Sets 40x leverage on CE and PE products.
@@ -80,6 +81,7 @@ class OrderManager:
             "ce_info": ce_info,
             "pe_info": pe_info,
             "size": size,
+            "fill_delay_sec": fill_delay_sec,
             "target_lots": ce_info.get("target_lots", TARGET_LOTS),
             "sizing_msg": ce_info.get("sizing_msg", f"{size} lots"),
             "success": False,
@@ -569,6 +571,7 @@ class OrderManager:
             else:
                 spot_price = 95000.0
 
+        fill_delay_sec = report.get("fill_delay_sec")
         msg = TelegramNotifier.format_entry_alert(
             date_str=datetime.now().strftime("%Y-%m-%d"),
             time_str=datetime.now().strftime("%H:%M:%S IST"),
@@ -587,6 +590,7 @@ class OrderManager:
             pe_bid_depth=pe_bid_depth,
             pe_spread_pct=pe_spread_pct,
             total_credit=total_credit,
+            fill_delay_sec=fill_delay_sec,
         )
         print("\n" + msg + "\n")
         self.notifier.send_message(msg, is_trade_alert=True)
