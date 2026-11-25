@@ -193,14 +193,17 @@ class DeltaCalculator:
             err = f"Pre-check failed: Non-positive price/quotes (Mark: {mark_price}, Bid: {best_bid}, Ask: {best_ask})"
             return False, err, metrics
 
-        # Layer 1: Max Spread Slippage Barrier (<= 8.0%)
+        is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
+
+        # Layer 1: Max Spread Slippage Barrier (<= 8.0% production, 500% testnet)
         spread = best_ask - best_bid
         spread_ratio = spread / mark_price
         metrics["spread"] = spread
         metrics["spread_ratio"] = spread_ratio
-        if spread_ratio > max_spread_ratio:
+        effective_max_spread = 5.0 if is_testnet else max_spread_ratio
+        if spread_ratio > effective_max_spread:
             reason = (
-                f"Layer 1 Failed: Spread ratio {spread_ratio:.2%} exceeds {max_spread_ratio:.1%} limit "
+                f"Layer 1 Failed: Spread ratio {spread_ratio:.2%} exceeds {effective_max_spread:.1%} limit "
                 f"(Spread: {spread:.2f}, Mark: {mark_price:.2f}, Ask: {best_ask:.2f}, Bid: {best_bid:.2f})"
             )
             return False, reason, metrics
@@ -229,10 +232,10 @@ class DeltaCalculator:
             )
             return False, reason, metrics
 
-        # Layer 3: Mark-to-Bid Discount (<= 2.0%)
+        # Layer 3: Mark-to-Bid Discount (<= 2.0% in Production, bypassed on Testnet)
         discount = (mark_price - best_bid) / mark_price
         metrics["mark_bid_discount"] = discount
-        if discount > 0.020:
+        if not is_testnet and discount > 0.020:
             reason = (
                 f"Layer 3 Failed: Mark-to-Bid discount {discount:.2%} exceeds 2.0% limit "
                 f"(Mark: {mark_price:.2f}, Bid: {best_bid:.2f})"
@@ -439,16 +442,19 @@ class DeltaCalculator:
 
             if best_bid <= 0.0 or best_ask <= 0.0:
                 continue
-            if mark_price < 5.0:
-                continue
 
             is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
-            min_bid = 1.0 if is_testnet else 5.0
+            min_mark = 0.10 if is_testnet else 5.0
+            if mark_price < min_mark:
+                continue
+
+            min_bid = 0.10 if is_testnet else 5.0
             if best_bid < min_bid:
                 continue
 
             spread = best_ask - best_bid
-            if (spread / mark_price) > 0.40:
+            allowed_max_spread = 5.0 if is_testnet else 0.40
+            if (spread / mark_price) > allowed_max_spread:
                 continue
 
             effective_min_depth = min(target_lots, min_tradeable_lots)

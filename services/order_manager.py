@@ -514,7 +514,12 @@ class OrderManager:
         resp = self.client.request("GET", "/v2/orders?state=open")
         if not resp or not resp.get("success"):
             return []
-        return resp.get("result", [])
+        res = resp.get("result", [])
+        if isinstance(res, list):
+            return [o for o in res if isinstance(o, dict)]
+        if isinstance(res, dict):
+            return [res]
+        return []
 
     def _verify_bracket_in_orders(
         self,
@@ -602,6 +607,7 @@ class OrderManager:
         surviving_entry_price: float,
         old_sl_order_id: int | None = None,
         tick_size: float = 0.1,
+        stopped_leg_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Combo A Cost-to-Cost Trail:
@@ -656,9 +662,21 @@ class OrderManager:
 
         # 3. Telegram notification
         surviving_orig_sl = surviving_entry_price * self.sl_multiplier
-        stopped_sym = f"{stopped_leg_name}_LEG"
-        stopped_entry = surviving_entry_price
-        stopped_exit = stopped_entry * self.sl_multiplier
+        stopped_sym = (
+            stopped_leg_info.get("symbol", f"{stopped_leg_name}_LEG")
+            if stopped_leg_info
+            else f"{stopped_leg_name}_LEG"
+        )
+        stopped_entry = (
+            float(stopped_leg_info.get("entry_price") or surviving_entry_price)
+            if stopped_leg_info
+            else surviving_entry_price
+        )
+        stopped_exit = (
+            float(stopped_leg_info.get("sl_trigger") or (stopped_entry * self.sl_multiplier))
+            if stopped_leg_info
+            else (stopped_entry * self.sl_multiplier)
+        )
 
         msg = TelegramNotifier.format_cost_trail_alert(
             date_str=datetime.now().strftime("%Y-%m-%d"),
@@ -729,6 +747,7 @@ class OrderManager:
                 surviving_entry_price=float(pe_data.get("entry_price") or 0.0),
                 old_sl_order_id=pe_data.get("sl_order_id"),
                 tick_size=float(pe_data.get("tick_size") or 0.1),
+                stopped_leg_info=ce_data,
             )
             state_data["trail_status"] = "TRAILED"
             state_data["stopped_leg"] = "CE"
@@ -748,6 +767,7 @@ class OrderManager:
                 surviving_entry_price=float(ce_data.get("entry_price") or 0.0),
                 old_sl_order_id=ce_data.get("sl_order_id"),
                 tick_size=float(ce_data.get("tick_size") or 0.1),
+                stopped_leg_info=pe_data,
             )
             state_data["trail_status"] = "TRAILED"
             state_data["stopped_leg"] = "PE"
@@ -781,7 +801,12 @@ class OrderManager:
                 print(f"[BREACH DETECTED] CE mark {ce_cur} >= SL {ce_sl}. Closing CE...")
                 self._rollback_leg(ce_data, abs(int(ce_pos.get("size", 1))), "CE")
                 res = self.trail_surviving_leg_to_cost(
-                    "CE", pe_data, pe_entry, pe_data.get("sl_order_id"), float(pe_data.get("tick_size") or 0.1)
+                    "CE",
+                    pe_data,
+                    pe_entry,
+                    pe_data.get("sl_order_id"),
+                    float(pe_data.get("tick_size") or 0.1),
+                    stopped_leg_info=ce_data,
                 )
                 state_data["trail_status"] = "TRAILED"
                 state_data["stopped_leg"] = "CE"
@@ -796,7 +821,12 @@ class OrderManager:
                 print(f"[BREACH DETECTED] PE mark {pe_cur} >= SL {pe_sl}. Closing PE...")
                 self._rollback_leg(pe_data, abs(int(pe_pos.get("size", 1))), "PE")
                 res = self.trail_surviving_leg_to_cost(
-                    "PE", ce_data, ce_entry, ce_data.get("sl_order_id"), float(ce_data.get("tick_size") or 0.1)
+                    "PE",
+                    ce_data,
+                    ce_entry,
+                    ce_data.get("sl_order_id"),
+                    float(ce_data.get("tick_size") or 0.1),
+                    stopped_leg_info=pe_data,
                 )
                 state_data["trail_status"] = "TRAILED"
                 state_data["stopped_leg"] = "PE"

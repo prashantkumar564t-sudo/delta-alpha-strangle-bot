@@ -23,11 +23,16 @@ API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
 
 def show_status() -> None:
+    load_env()
+    base_url = os.getenv("DELTA_BASE_URL", BASE_URL)
+    api_key = os.getenv("DELTA_API_KEY", API_KEY)
+    api_secret = os.getenv("DELTA_API_SECRET", API_SECRET)
+
     print("\n" + "=" * 60)
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] DELTA ALPHA STRANGLE BOT — STATUS CHECK")
     print("=" * 60)
 
-    print(f"• Base URL: {BASE_URL}")
+    print(f"• Base URL: {base_url}")
     print(f"• Default Leverage: {DEFAULT_LEVERAGE}x")
     print(f"• Default Lot Size: {LOT_SIZE}")
 
@@ -43,7 +48,7 @@ def show_status() -> None:
     else:
         print("\n[Local State File] No active state.json found (Flat / Never traded).")
 
-    client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
+    client = DeltaApiClient(api_key, api_secret, base_url)
 
     print("\n[Exchange Positions Check (/v2/positions)]")
     pos_res = client.request("GET", "/v2/positions?underlying_asset_symbol=BTC")

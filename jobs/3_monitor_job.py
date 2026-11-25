@@ -21,6 +21,11 @@ API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
 
 def run() -> None:
+    load_env()
+    base_url = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.org")
+    api_key = os.getenv("DELTA_API_KEY", "")
+    api_secret = os.getenv("DELTA_API_SECRET", "")
+
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Fast Pre-Flight Check (Zero-Proxy Bandwidth Guard):
@@ -58,7 +63,7 @@ def run() -> None:
     print(f"[{now_str}] RUNNING JOB 3: COMBO A COST TRAIL MONITOR (ACTIVE POSITION)")
     print("========================================================")
 
-    client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
+    client = DeltaApiClient(api_key, api_secret, base_url)
     order_mgr = OrderManager(client)
     res = order_mgr.monitor_and_update_cost_trail(state_file_path=state_file)
     print(f"[MONITOR RESULT] Status: {res.get('status')} | Details: {res.get('message', res)}")

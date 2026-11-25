@@ -1,11 +1,12 @@
 import os
 
 
-def load_env(env_path: str | None = None) -> None:
+def load_env(env_path: str | None = None, override: bool = False) -> None:
     """
     Lightweight built-in .env parser using only standard library.
     Parses key-value pairs, ignores empty lines and comments (#),
     supports UTF-8 and UTF-8-SIG (Windows BOM), and injects into os.environ.
+    Preserves explicitly set environment variables unless override=True.
     """
     if env_path is None:
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +28,9 @@ def load_env(env_path: str | None = None) -> None:
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, val = line.split("=", 1)
-            os.environ[key.strip()] = val.strip().strip("'\"")
+            k = key.strip()
+            if k and (override or k not in os.environ):
+                os.environ[k] = val.strip().strip("'\"")
 
 
 def setup_proxy() -> str | None:
