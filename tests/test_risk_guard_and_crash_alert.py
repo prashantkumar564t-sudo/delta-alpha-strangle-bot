@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
@@ -110,7 +110,8 @@ def test_telegram_crash_alert_formatter():
     assert "aborted safely" in msg
 
 
-def test_entry_job_non_blocking_drawdown_warning(monkeypatch):
+@patch("time.sleep", return_value=None)
+def test_entry_job_non_blocking_drawdown_warning(_mock_sleep, monkeypatch):
     """Verifies that drawdown breach triggers an advisory alert without blocking entry job execution."""
     import importlib
     from unittest.mock import patch
@@ -126,6 +127,8 @@ def test_entry_job_non_blocking_drawdown_warning(monkeypatch):
         ),
         patch.object(entry_job.TelegramNotifier, "send_message", mock_send),
         patch.object(entry_job.DeltaCalculator, "get_10_delta_strikes", mock_strikes),
+        patch.object(entry_job, "ENTRY_WINDOW_SECONDS", 5),
+        patch.object(entry_job, "ENTRY_RETRY_INTERVAL_SECONDS", 5),
     ):
         entry_job.run()
 

@@ -68,6 +68,11 @@ SL_MULTIPLIER = float(os.getenv("SL_MULTIPLIER", "2.00"))
 COST_TRAIL_MULTIPLIER = float(os.getenv("COST_TRAIL_MULTIPLIER", "1.00"))
 HARD_KILL_SWITCH_USD = float(os.getenv("HARD_KILL_SWITCH_USD", "1185.00"))
 
+# Entry Timing & Liquidity Guard Parameters
+MAX_SPREAD_RATIO = float(os.getenv("MAX_SPREAD_RATIO", "0.080"))
+ENTRY_WINDOW_SECONDS = int(os.getenv("ENTRY_WINDOW_SECONDS", "120"))
+ENTRY_RETRY_INTERVAL_SECONDS = int(os.getenv("ENTRY_RETRY_INTERVAL_SECONDS", "5"))
+
 # Telegram Notifications
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()

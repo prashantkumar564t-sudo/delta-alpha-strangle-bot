@@ -144,11 +144,12 @@ class DeltaCalculator:
         bid_size: float,
         order_lots: int = 1000,
         min_tradeable_lots: int = 100,
+        max_spread_ratio: float = 0.080,
         sleep_fn: Any = time.sleep,
     ) -> tuple[bool, str, dict[str, Any]]:
         """
         4-Layer Pre-Trade Liquidity & Anti-Trap Filter:
-        Layer 1: Spread / Mark <= 0.035 (3.5% max spread barrier)
+        Layer 1: Spread / Mark <= 0.080 (8.0% max spread barrier, accommodates 2-3 tick MM quotes on low-dollar 0-DTEs)
         Layer 2: 20% L1 Footprint Rule (safe_lots = min(order_lots, int(bid_size * 0.20)) >= min_tradeable_lots)
         Layer 3: (Mark - Best Bid) / Mark <= 0.020 (2.0% max Mark-to-Bid discount)
         Layer 4: 2-Snapshot Stability Check (sample twice 2.5s apart):
@@ -163,6 +164,7 @@ class DeltaCalculator:
             "bid_size": bid_size,
             "order_lots": order_lots,
             "min_tradeable_lots": min_tradeable_lots,
+            "max_spread_ratio": max_spread_ratio,
         }
 
         # Pre-check: non-positive prices
@@ -170,14 +172,14 @@ class DeltaCalculator:
             err = f"Pre-check failed: Non-positive price/quotes (Mark: {mark_price}, Bid: {best_bid}, Ask: {best_ask})"
             return False, err, metrics
 
-        # Layer 1: Max Spread Slippage Barrier (<= 3.5%)
+        # Layer 1: Max Spread Slippage Barrier (<= 8.0%)
         spread = best_ask - best_bid
         spread_ratio = spread / mark_price
         metrics["spread"] = spread
         metrics["spread_ratio"] = spread_ratio
-        if spread_ratio > 0.035:
+        if spread_ratio > max_spread_ratio:
             reason = (
-                f"Layer 1 Failed: Spread ratio {spread_ratio:.2%} exceeds 3.5% limit "
+                f"Layer 1 Failed: Spread ratio {spread_ratio:.2%} exceeds {max_spread_ratio:.1%} limit "
                 f"(Spread: {spread:.2f}, Mark: {mark_price:.2f}, Ask: {best_ask:.2f}, Bid: {best_bid:.2f})"
             )
             return False, reason, metrics
@@ -281,6 +283,8 @@ class DeltaCalculator:
         min_tradeable_lots: int = 100,
         lot_size: int | None = None,
         enable_anti_trap: bool = True,
+        max_spread_ratio: float = 0.080,
+        suppress_block_alert: bool = False,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """
         Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
@@ -443,18 +447,19 @@ class DeltaCalculator:
             effective_min = min(target_lots, min_tradeable_lots)
             if final_lots < effective_min:
                 print(f"[ANTI-TRAP BLOCKED] Sizing below threshold: {sizing_msg}")
-                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
-                    date_str=datetime.now().strftime("%Y-%m-%d"),
-                    time_str=datetime.now().strftime("%H:%M:%S"),
-                    layer_name=f"Layer 2 — Top Bid Depth Cushion (< {effective_min * 5} contracts)",
-                    contract_symbol=f"{best_ce['symbol']} / {best_pe['symbol']}",
-                    violation_reason=sizing_msg,
-                    mark_price=best_ce.get("mark_price"),
-                    best_bid=best_ce.get("best_bid"),
-                    best_ask=best_ce.get("best_ask"),
-                    bid_size=min(float(best_ce.get("bid_size", 0.0)), float(best_pe.get("bid_size", 0.0))),
-                )
-                self.notifier.send_message(block_alert, is_trade_alert=True)
+                if not suppress_block_alert:
+                    block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                        date_str=datetime.now().strftime("%Y-%m-%d"),
+                        time_str=datetime.now().strftime("%H:%M:%S"),
+                        layer_name=f"Layer 2 — Top Bid Depth Cushion (< {effective_min * 5} contracts)",
+                        contract_symbol=f"{best_ce['symbol']} / {best_pe['symbol']}",
+                        violation_reason=sizing_msg,
+                        mark_price=best_ce.get("mark_price"),
+                        best_bid=best_ce.get("best_bid"),
+                        best_ask=best_ce.get("best_ask"),
+                        bid_size=min(float(best_ce.get("bid_size", 0.0)), float(best_pe.get("bid_size", 0.0))),
+                    )
+                    self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"\n[DYNAMIC SIZING] {sizing_msg}")
@@ -468,10 +473,11 @@ class DeltaCalculator:
                 bid_size=best_ce["bid_size"],
                 order_lots=final_lots,
                 min_tradeable_lots=min_tradeable_lots,
+                max_spread_ratio=max_spread_ratio,
             )
             if not ce_ok:
                 print(f"[ANTI-TRAP BLOCKED] CE Rejected: {ce_reason}")
-                layer_name = "Layer 1 — Maximum Bid-Ask Spread Gate (> 3.5%)"
+                layer_name = f"Layer 1 — Maximum Bid-Ask Spread Gate (> {max_spread_ratio:.1%})"
                 if "gap" in ce_reason.lower():
                     layer_name = "Layer 3 — Mark-to-Bid Slippage Gap (> 2.0%)"
                 elif "deviation" in ce_reason.lower() or "stability" in ce_reason.lower():
@@ -479,18 +485,19 @@ class DeltaCalculator:
                 elif "depth" in ce_reason.lower() or "cushion" in ce_reason.lower():
                     layer_name = "Layer 2 — Top Bid Depth Cushion"
 
-                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
-                    date_str=datetime.now().strftime("%Y-%m-%d"),
-                    time_str=datetime.now().strftime("%H:%M:%S"),
-                    layer_name=layer_name,
-                    contract_symbol=best_ce["symbol"],
-                    violation_reason=ce_reason,
-                    mark_price=best_ce.get("mark_price"),
-                    best_bid=best_ce.get("best_bid"),
-                    best_ask=best_ce.get("best_ask"),
-                    bid_size=best_ce.get("bid_size"),
-                )
-                self.notifier.send_message(block_alert, is_trade_alert=True)
+                if not suppress_block_alert:
+                    block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                        date_str=datetime.now().strftime("%Y-%m-%d"),
+                        time_str=datetime.now().strftime("%H:%M:%S"),
+                        layer_name=layer_name,
+                        contract_symbol=best_ce["symbol"],
+                        violation_reason=ce_reason,
+                        mark_price=best_ce.get("mark_price"),
+                        best_bid=best_ce.get("best_bid"),
+                        best_ask=best_ce.get("best_ask"),
+                        bid_size=best_ce.get("bid_size"),
+                    )
+                    self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"[ANTI-TRAP AUDIT] Auditing PE ({best_pe['symbol']}) through 4-layer filter at {final_lots} lots...")
@@ -503,10 +510,11 @@ class DeltaCalculator:
                 bid_size=best_pe["bid_size"],
                 order_lots=final_lots,
                 min_tradeable_lots=min_tradeable_lots,
+                max_spread_ratio=max_spread_ratio,
             )
             if not pe_ok:
                 print(f"[ANTI-TRAP BLOCKED] PE Rejected: {pe_reason}")
-                layer_name = "Layer 1 — Maximum Bid-Ask Spread Gate (> 3.5%)"
+                layer_name = f"Layer 1 — Maximum Bid-Ask Spread Gate (> {max_spread_ratio:.1%})"
                 if "gap" in pe_reason.lower():
                     layer_name = "Layer 3 — Mark-to-Bid Slippage Gap (> 2.0%)"
                 elif "deviation" in pe_reason.lower() or "stability" in pe_reason.lower():
@@ -514,18 +522,19 @@ class DeltaCalculator:
                 elif "depth" in pe_reason.lower() or "cushion" in pe_reason.lower():
                     layer_name = "Layer 2 — Top Bid Depth Cushion"
 
-                block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
-                    date_str=datetime.now().strftime("%Y-%m-%d"),
-                    time_str=datetime.now().strftime("%H:%M:%S"),
-                    layer_name=layer_name,
-                    contract_symbol=best_pe["symbol"],
-                    violation_reason=pe_reason,
-                    mark_price=best_pe.get("mark_price"),
-                    best_bid=best_pe.get("best_bid"),
-                    best_ask=best_pe.get("best_ask"),
-                    bid_size=best_pe.get("bid_size"),
-                )
-                self.notifier.send_message(block_alert, is_trade_alert=True)
+                if not suppress_block_alert:
+                    block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
+                        date_str=datetime.now().strftime("%Y-%m-%d"),
+                        time_str=datetime.now().strftime("%H:%M:%S"),
+                        layer_name=layer_name,
+                        contract_symbol=best_pe["symbol"],
+                        violation_reason=pe_reason,
+                        mark_price=best_pe.get("mark_price"),
+                        best_bid=best_pe.get("best_bid"),
+                        best_ask=best_pe.get("best_ask"),
+                        bid_size=best_pe.get("bid_size"),
+                    )
+                    self.notifier.send_message(block_alert, is_trade_alert=True)
                 return None, None
 
             print(f"[ANTI-TRAP AUDIT] Both CE and PE cleared all 4 liquidity layers at {final_lots} lots! ✅")

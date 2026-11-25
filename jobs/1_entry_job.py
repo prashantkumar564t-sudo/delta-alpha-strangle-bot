@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -12,7 +13,10 @@ from config.settings import (
     COST_TRAIL_MULTIPLIER,
     DEFAULT_LEVERAGE,
     DRY_RUN,
+    ENTRY_RETRY_INTERVAL_SECONDS,
+    ENTRY_WINDOW_SECONDS,
     HARD_KILL_SWITCH_USD,
+    MAX_SPREAD_RATIO,
     MIN_TRADEABLE_LOTS,
     SL_MULTIPLIER,
     TARGET_LOTS,
@@ -70,19 +74,50 @@ def run():
 
     target_lots = TARGET_LOTS
     min_tradeable_lots = MIN_TRADEABLE_LOTS
+    max_window_sec = ENTRY_WINDOW_SECONDS
+    poll_interval = ENTRY_RETRY_INTERVAL_SECONDS
+    max_attempts = max(1, max_window_sec // poll_interval)
+
     print(
-        f"\n[1/3] Fetching 0-DTE 10-Delta Strikes (Target: {target_lots} lots, Min Floor: {min_tradeable_lots} lots)..."
-    )
-    ce, pe = calc.get_10_delta_strikes(
-        symbol="BTC",
-        target_delta=0.10,
-        target_lots=target_lots,
-        min_tradeable_lots=min_tradeable_lots,
+        f"\n[1/3] Starting Smart {max_window_sec}s Entry Window "
+        f"(Target: {target_lots} lots, Min Floor: {min_tradeable_lots} lots, Max Spread: {MAX_SPREAD_RATIO:.1%}, "
+        f"Polling every {poll_interval}s, max {max_attempts} attempts)..."
     )
 
+    ce, pe = None, None
+    start_time = time.time()
+    for attempt in range(1, max_attempts + 1):
+        elapsed_sec = int(time.time() - start_time)
+        print(f"\n[POLL ATTEMPT {attempt}/{max_attempts} | Elapsed: {elapsed_sec}s / {max_window_sec}s]")
+
+        # Only dispatch Telegram block alert on the very last attempt if window fully expires
+        is_last_attempt = attempt == max_attempts
+
+        ce, pe = calc.get_10_delta_strikes(
+            symbol="BTC",
+            target_delta=0.10,
+            target_lots=target_lots,
+            min_tradeable_lots=min_tradeable_lots,
+            enable_anti_trap=True,
+            max_spread_ratio=MAX_SPREAD_RATIO,
+            suppress_block_alert=(not is_last_attempt),
+        )
+
+        if ce and pe:
+            print(
+                f"✅ [ENTRY WINDOW SUCCESS] Qualifying 10-Delta strikes locked on attempt {attempt} (Elapsed: {elapsed_sec}s)!"
+            )
+            break
+
+        if not is_last_attempt:
+            time.sleep(poll_interval)
+
     if not ce or not pe:
-        msg = "⚠️ [JOB 1 SKIPPED] Today's 0-DTE 10-Delta strikes not available or failed spread/depth filters. Skipping entry safely."
-        print(msg)
+        msg = (
+            f"⚠️ [JOB 1 SKIPPED] Today's 0-DTE 10-Delta strikes not available or failed spread/depth filters "
+            f"after {max_attempts} attempts across {max_window_sec}s window. Skipping entry safely."
+        )
+        print(f"\n{msg}")
         notifier.send_message(msg)
         return
 

@@ -279,3 +279,49 @@ def test_exit_blast_radius_isolation(_mock_sleep):
     assert summary["success"] is True
     # Product 999 was not touched
     assert len(summary["remaining_positions"]) == 0
+
+
+@patch("time.sleep", return_value=None)
+@patch("services.order_manager.OrderManager.execute_strangle_with_dual_verification")
+@patch("services.delta_calculator.DeltaCalculator.get_10_delta_strikes")
+@patch("services.risk_guard.RiskGuard.check_hard_kill_switch", return_value=(False, 0.0, "OK"))
+@patch("services.notifier.TelegramNotifier.send_message")
+def test_smart_entry_retry_loop_recovers_after_micro_bid(
+    mock_send_telegram,
+    mock_kill_switch,
+    mock_get_strikes,
+    mock_execute,
+    _mock_sleep,
+):
+    """Verifies that 1_entry_job retries when attempt 1 fails and executes on attempt 2 without false skip."""
+    import importlib
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    # Attempt 1 returns (None, None); Attempt 2 returns valid CE, PE
+    mock_ce = {"id": 101, "symbol": "C-BTC-70000", "allocated_lots": 1000, "sizing_msg": "Full 1000"}
+    mock_pe = {"id": 102, "symbol": "P-BTC-60000", "allocated_lots": 1000, "sizing_msg": "Full 1000"}
+
+    mock_get_strikes.side_effect = [
+        (None, None),
+        (mock_ce, mock_pe),
+    ]
+    mock_execute.return_value = {
+        "success": True,
+        "ce": {"sl_trigger": 60.0},
+        "pe": {"sl_trigger": 40.0},
+    }
+
+    with (
+        patch.object(entry_job, "ENTRY_WINDOW_SECONDS", 10),
+        patch.object(entry_job, "ENTRY_RETRY_INTERVAL_SECONDS", 5),
+    ):
+        entry_job.run()
+
+    # Verify get_10_delta_strikes was called twice
+    assert mock_get_strikes.call_count == 2
+    # Verify execute_strangle_with_dual_verification was called with 1000 lots
+    mock_execute.assert_called_once_with(ce_info=mock_ce, pe_info=mock_pe, size=1000)
+    # Verify skip message was NOT sent
+    for call in mock_send_telegram.call_args_list:
+        assert "JOB 1 SKIPPED" not in call[0][0]

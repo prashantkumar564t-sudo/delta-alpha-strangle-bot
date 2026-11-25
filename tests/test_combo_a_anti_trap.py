@@ -17,28 +17,67 @@ from services.order_manager import OrderManager
 
 
 def test_anti_trap_layer1_max_spread_barrier():
-    """Verifies that Layer 1 enforces (Spread / Mark) <= 0.035 (3.5%)."""
+    """Verifies that Layer 1 enforces (Spread / Mark) <= 0.080 (8.0%)."""
     mock_client = MagicMock()
     calc = DeltaCalculator(mock_client)
 
-    # Passing case: Spread = 3.0, Mark = 100.0 -> 3.0% <= 3.5%
+    # Passing case: Spread = 7.5, Mark = 100.0 -> 7.5% <= 8.0%, Discount = (100 - 98.5)/100 = 1.5% <= 2.0%
     # Provide mock snapshot 2 for Layer 4 so Layer 1 can pass through
     mock_client.request_public.return_value = {
         "success": True,
-        "result": {"quotes": {"best_bid": "98.5", "best_ask": "101.5", "bid_size": "600"}},
+        "result": {"quotes": {"best_bid": "98.5", "best_ask": "106.0", "bid_size": "600"}},
     }
     ok, _reason, metrics = calc.check_anti_trap_liquidity(
         product_id=1,
         symbol="C-BTC-100-TEST",
         mark_price=100.0,
         best_bid=98.5,
-        best_ask=101.5,
+        best_ask=106.0,
         bid_size=600.0,
         order_lots=1,
         sleep_fn=None,
     )
     assert ok is True
-    assert metrics["spread_ratio"] <= 0.035
+    assert metrics["spread_ratio"] <= 0.080
+
+    # Failing case: Spread = 9.0, Mark = 100.0 -> 9.0% > 8.0%, Discount = 1.5% <= 2.0%
+    ok, reason, _metrics = calc.check_anti_trap_liquidity(
+        product_id=1,
+        symbol="C-BTC-100-TEST",
+        mark_price=100.0,
+        best_bid=98.5,
+        best_ask=107.5,
+        bid_size=600.0,
+        order_lots=1,
+        sleep_fn=None,
+    )
+    assert ok is False
+    assert "Layer 1 Failed" in reason
+
+
+def test_8pct_spread_cap_allows_institutional_2tick_quotes():
+    """Verifies that 8.0% spread cap passes 2-tick institutional MM quotes ($2 spread on $30 option = 6.67%)."""
+    mock_client = MagicMock()
+    calc = DeltaCalculator(mock_client)
+
+    # Mark = 30.0, Bid = 29.5, Ask = 31.5 -> Spread = 2.0 (6.67% <= 8.0%), Discount = 0.5 (1.67% <= 2.0%)
+    mock_client.request_public.return_value = {
+        "success": True,
+        "result": {"quotes": {"best_bid": "29.5", "best_ask": "31.5", "bid_size": "6000"}},
+    }
+    ok, _reason, metrics = calc.check_anti_trap_liquidity(
+        product_id=1,
+        symbol="C-BTC-70000-TODAY",
+        mark_price=30.0,
+        best_bid=29.5,
+        best_ask=31.5,
+        bid_size=6000.0,
+        order_lots=1000,
+        sleep_fn=None,
+    )
+    assert ok is True
+    assert round(metrics["spread_ratio"], 4) == round(2.0 / 30.0, 4)
+    assert metrics["spread_ratio"] <= 0.080
 
 
 def test_1_lot_fixed_order_passes_liquidity():
@@ -74,20 +113,6 @@ def test_1_lot_fixed_order_passes_liquidity():
     )
     assert ok is True
     assert metrics["safe_lots"] == 1
-
-    # Failing case: Spread = 4.5, Mark = 100.0 -> 4.5% > 3.5%
-    ok, reason, _metrics = calc.check_anti_trap_liquidity(
-        product_id=1,
-        symbol="C-BTC-100-TEST",
-        mark_price=100.0,
-        best_bid=97.0,
-        best_ask=101.5,
-        bid_size=600.0,
-        order_lots=1,
-        sleep_fn=None,
-    )
-    assert ok is False
-    assert "Layer 1 Failed" in reason
 
 
 def test_anti_trap_layer2_top_bid_depth_cushion():
