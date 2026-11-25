@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from typing import Any
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
@@ -15,11 +16,16 @@ from config.settings import (
     DRY_RUN,
     ENTRY_RETRY_INTERVAL_SECONDS,
     ENTRY_WINDOW_SECONDS,
+    EXECUTION_HOUR,
+    EXECUTION_MINUTE,
     HARD_KILL_SWITCH_USD,
     MAX_SPREAD_RATIO,
     MIN_TRADEABLE_LOTS,
     SL_MULTIPLIER,
     TARGET_LOTS,
+    WARMUP_POLL_INTERVAL_SECONDS,
+    WARMUP_START_HOUR,
+    WARMUP_START_MINUTE,
     load_env,
 )
 
@@ -36,25 +42,8 @@ API_KEY = os.getenv("DELTA_API_KEY", "")
 API_SECRET = os.getenv("DELTA_API_SECRET", "")
 
 
-def run():
-    print("\n========================================================")
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] RUNNING JOB 1: ENTRY & BRACKET SL")
-    print("========================================================")
-
-    notifier = TelegramNotifier()
-    client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
-    calc = DeltaCalculator(client)
-    order_mgr = OrderManager(
-        client,
-        default_leverage=DEFAULT_LEVERAGE,
-        sl_multiplier=SL_MULTIPLIER,
-        cost_trail_multiplier=COST_TRAIL_MULTIPLIER,
-        dry_run=DRY_RUN,
-    )
-
-    # ------------------------------------------------------------------
-    # PRE-FLIGHT RISK GATE: HARD STRATEGY KILL-SWITCH ($1,185 MDD Barrier)
-    # ------------------------------------------------------------------
+def check_drawdown_warning(notifier: TelegramNotifier) -> tuple[bool, float, str]:
+    """Pre-flight risk check: emits non-blocking advisory alert if MDD threshold is breached."""
     ledger_path = os.path.join(ROOT_DIR, "data", "trade_ledger.csv")
     is_breached, current_dd, reason = RiskGuard.check_hard_kill_switch(
         max_drawdown_limit=HARD_KILL_SWITCH_USD,
@@ -71,6 +60,99 @@ def run():
         print(f"\n[DRAWDOWN WARNING] {reason}")
         print(warning_alert)
         notifier.send_message(warning_alert, is_trade_alert=False)
+    return is_breached, current_dd, reason
+
+
+def run_phase1_warmup(
+    calc: DeltaCalculator,
+    notifier: TelegramNotifier,
+    now_fn: Any = datetime.now,
+    sleep_fn: Any = time.sleep,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """
+    Phase 1: 09:58:00 to 09:59:59 IST — Warm-Up & Target Lock
+    - Scans 0DTE option chain, locks 0.10 Delta CE & PE strikes in memory.
+    - Polls locked strikes every 5s until 10:00:00 IST (zero orders placed).
+    - Dynamically re-locks if delta drifts outside [0.07, 0.13].
+    """
+    print("\n========================================================")
+    print(f"[{now_fn().strftime('%Y-%m-%d %H:%M:%S')}] PHASE 1: 09:58 IST WARM-UP & TARGET LOCK")
+    print("========================================================")
+
+    now = now_fn()
+    exec_target = now.replace(hour=EXECUTION_HOUR, minute=EXECUTION_MINUTE, second=0, microsecond=0)
+
+    locked_ce, locked_pe = calc.lock_10_delta_strikes(symbol="BTC", target_delta=0.10)
+    if not locked_ce or not locked_pe:
+        print("[PHASE 1 WARNING] Could not lock 10-Delta targets during warm-up. Will retry in Phase 2.")
+        return None, None
+
+    print(
+        f"🔒 [PHASE 1 LOCKED] CE: {locked_ce['symbol']} (Delta: {locked_ce['delta']:.4f}) | "
+        f"PE: {locked_pe['symbol']} (Delta: {locked_pe['delta']:.4f})"
+    )
+
+    while now_fn() < exec_target:
+        remaining_sec = (exec_target - now_fn()).total_seconds()
+        if remaining_sec <= 0:
+            break
+
+        sleep_time = min(float(WARMUP_POLL_INTERVAL_SECONDS), remaining_sec)
+        sleep_fn(sleep_time)
+
+        # Poll locked strikes & check drift
+        updated_ce = calc.refresh_strike_quote(locked_ce)
+        updated_pe = calc.refresh_strike_quote(locked_pe)
+
+        if updated_ce:
+            locked_ce = updated_ce
+        if updated_pe:
+            locked_pe = updated_pe
+
+        ce_drifted = not calc.check_delta_drift(locked_ce)
+        pe_drifted = not calc.check_delta_drift(locked_pe)
+
+        if ce_drifted or pe_drifted:
+            print(
+                f"⚠️ [PHASE 1 DRIFT] Delta drifted outside [0.07, 0.13] "
+                f"(CE: {locked_ce.get('delta')}, PE: {locked_pe.get('delta')}). Re-locking..."
+            )
+            new_ce, new_pe = calc.lock_10_delta_strikes(symbol="BTC", target_delta=0.10)
+            if new_ce and new_pe:
+                locked_ce, locked_pe = new_ce, new_pe
+                print(
+                    f"🔒 [PHASE 1 RE-LOCKED] New CE: {locked_ce['symbol']} (Delta: {locked_ce['delta']:.4f}) | "
+                    f"New PE: {locked_pe['symbol']} (Delta: {locked_pe['delta']:.4f})"
+                )
+        else:
+            print(
+                f"[PHASE 1 TRACKING | {now_fn().strftime('%H:%M:%S')}] "
+                f"CE: {locked_ce['symbol']} (Delta: {locked_ce['delta']:.4f}, Bid: {locked_ce['best_bid']}, Size: {locked_ce['bid_size']:.0f}) | "
+                f"PE: {locked_pe['symbol']} (Delta: {locked_pe['delta']:.4f}, Bid: {locked_pe['best_bid']}, Size: {locked_pe['bid_size']:.0f})"
+            )
+
+    print(f"[{now_fn().strftime('%Y-%m-%d %H:%M:%S')}] Phase 1 complete. Handing over locked strikes to Phase 2.\n")
+    return locked_ce, locked_pe
+
+
+def run_phase2_sniper_execution(
+    calc: DeltaCalculator,
+    order_mgr: OrderManager,
+    notifier: TelegramNotifier,
+    locked_ce: dict[str, Any] | None = None,
+    locked_pe: dict[str, Any] | None = None,
+    now_fn: Any = datetime.now,
+    sleep_fn: Any = time.sleep,
+) -> bool:
+    """
+    Phase 2: 10:00:00 to 10:02:00 IST — Sniper Liquidity Check & Execution
+    - Uses pre-locked strikes (skips chain scan) or locks strikes if not provided.
+    - Polls locked L1 orderbooks every 5s (up to 120s / 24 attempts) for Spread <= 8.0%, L1 Depth >= 5,000 lots, etc.
+    - Executes Market Sell 1,000 Lots (1.0 BTC) + 100% SL immediately on first qualifying poll.
+    """
+    print("========================================================")
+    print(f"[{now_fn().strftime('%Y-%m-%d %H:%M:%S')}] PHASE 2: 10:00 IST SNIPER LIQUIDITY CHECK & EXECUTION")
+    print("========================================================")
 
     target_lots = TARGET_LOTS
     min_tradeable_lots = MIN_TRADEABLE_LOTS
@@ -79,8 +161,8 @@ def run():
     max_attempts = max(1, max_window_sec // poll_interval)
 
     print(
-        f"\n[1/3] Starting Smart {max_window_sec}s Entry Window "
-        f"(Target: {target_lots} lots, Min Floor: {min_tradeable_lots} lots, Max Spread: {MAX_SPREAD_RATIO:.1%}, "
+        f"\n[1/3] Starting Smart {max_window_sec}s Sniper Window "
+        f"(Target: {target_lots} lots [1.0 BTC], Min Floor: {min_tradeable_lots} lots, Max Spread: {MAX_SPREAD_RATIO:.1%}, "
         f"Polling every {poll_interval}s, max {max_attempts} attempts)..."
     )
 
@@ -90,7 +172,6 @@ def run():
         elapsed_sec = int(time.time() - start_time)
         print(f"\n[POLL ATTEMPT {attempt}/{max_attempts} | Elapsed: {elapsed_sec}s / {max_window_sec}s]")
 
-        # Only dispatch Telegram block alert on the very last attempt if window fully expires
         is_last_attempt = attempt == max_attempts
 
         ce, pe = calc.get_10_delta_strikes(
@@ -101,16 +182,18 @@ def run():
             enable_anti_trap=True,
             max_spread_ratio=MAX_SPREAD_RATIO,
             suppress_block_alert=(not is_last_attempt),
+            locked_ce=locked_ce,
+            locked_pe=locked_pe,
         )
 
         if ce and pe:
             print(
-                f"✅ [ENTRY WINDOW SUCCESS] Qualifying 10-Delta strikes locked on attempt {attempt} (Elapsed: {elapsed_sec}s)!"
+                f"✅ [SNIPER EXECUTION LOCKED] Qualifying 10-Delta strikes cleared all liquidity barriers on attempt {attempt} (Elapsed: {elapsed_sec}s)!"
             )
             break
 
         if not is_last_attempt:
-            time.sleep(poll_interval)
+            sleep_fn(poll_interval)
 
     if not ce or not pe:
         msg = (
@@ -119,7 +202,7 @@ def run():
         )
         print(f"\n{msg}")
         notifier.send_message(msg)
-        return
+        return False
 
     final_lots = int(ce.get("allocated_lots", target_lots))
     sizing_msg = ce.get("sizing_msg", f"Allocated: {final_lots} lots")
@@ -165,6 +248,42 @@ def run():
 
         print(f"[SUCCESS] State saved to {state_file}")
     print("[FINISHED] Job 1 execution complete.\n")
+    return True
+
+
+def run(now_fn: Any = datetime.now, sleep_fn: Any = time.sleep) -> bool:
+    print("\n========================================================")
+    print(f"[{now_fn().strftime('%Y-%m-%d %H:%M:%S')}] RUNNING JOB 1: 2-PHASE ENTRY & BRACKET SL")
+    print("========================================================")
+
+    notifier = TelegramNotifier()
+    client = DeltaApiClient(API_KEY, API_SECRET, BASE_URL)
+    calc = DeltaCalculator(client)
+    order_mgr = OrderManager(
+        client,
+        default_leverage=DEFAULT_LEVERAGE,
+        sl_multiplier=SL_MULTIPLIER,
+        cost_trail_multiplier=COST_TRAIL_MULTIPLIER,
+        dry_run=DRY_RUN,
+    )
+
+    # 1. Pre-flight non-blocking drawdown risk check
+    check_drawdown_warning(notifier)
+
+    # 2. Timing Gate: Determine Phase 1 vs Phase 2
+    now = now_fn()
+    exec_target = now.replace(hour=EXECUTION_HOUR, minute=EXECUTION_MINUTE, second=0, microsecond=0)
+    warmup_target = now.replace(hour=WARMUP_START_HOUR, minute=WARMUP_START_MINUTE, second=0, microsecond=0)
+
+    locked_ce, locked_pe = None, None
+    if warmup_target <= now < exec_target:
+        # Phase 1: 09:58:00 to 09:59:59 IST
+        locked_ce, locked_pe = run_phase1_warmup(calc, notifier, now_fn=now_fn, sleep_fn=sleep_fn)
+
+    # Phase 2: 10:00:00 to 10:02:00 IST (Sniper Liquidity Check & Execution)
+    return run_phase2_sniper_execution(
+        calc, order_mgr, notifier, locked_ce=locked_ce, locked_pe=locked_pe, now_fn=now_fn, sleep_fn=sleep_fn
+    )
 
 
 if __name__ == "__main__":

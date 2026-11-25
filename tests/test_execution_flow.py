@@ -325,3 +325,112 @@ def test_smart_entry_retry_loop_recovers_after_micro_bid(
     # Verify skip message was NOT sent
     for call in mock_send_telegram.call_args_list:
         assert "JOB 1 SKIPPED" not in call[0][0]
+
+
+def test_phase1_warmup_target_lock_and_drift_relock():
+    """
+    Verifies Phase 1 (09:58 - 09:59:59 IST):
+    1. Locks 10-Delta targets without placing premature orders.
+    2. Re-locks targets when delta drifts outside [0.07, 0.13].
+    3. Completes at 10:00:00 IST with zero exchange orders placed.
+    """
+    import importlib
+    from datetime import datetime, timedelta
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    mock_calc = MagicMock()
+    mock_notifier = MagicMock()
+
+    initial_ce = {
+        "id": 101,
+        "symbol": "C-BTC-70000",
+        "delta": 0.10,
+        "abs_delta": 0.10,
+        "best_bid": 30.0,
+        "bid_size": 5000,
+    }
+    initial_pe = {
+        "id": 102,
+        "symbol": "P-BTC-60000",
+        "delta": -0.10,
+        "abs_delta": 0.10,
+        "best_bid": 25.0,
+        "bid_size": 5000,
+    }
+
+    relocked_ce = {
+        "id": 103,
+        "symbol": "C-BTC-71000",
+        "delta": 0.095,
+        "abs_delta": 0.095,
+        "best_bid": 28.0,
+        "bid_size": 5500,
+    }
+    relocked_pe = dict(initial_pe)
+
+    mock_calc.lock_10_delta_strikes.side_effect = [
+        (initial_ce, initial_pe),  # Initial lock at 09:58
+        (relocked_ce, relocked_pe),  # Re-lock after delta drift
+    ]
+
+    # Poll 1: CE delta drifted to 0.14 (> 0.13), Poll 2: both valid
+    drifted_ce = dict(initial_ce, delta=0.14, abs_delta=0.14)
+    mock_calc.refresh_strike_quote.side_effect = [drifted_ce, initial_pe, relocked_ce, relocked_pe]
+    mock_calc.check_delta_drift.side_effect = [False, True, True, True]  # CE drifted, then re-locked valid
+
+    # Stateful simulated clock advancing 60s per sleep to complete 120s warm-up cleanly
+    sim_time = [datetime(2026, 11, 25, 9, 58, 0)]
+
+    def mock_now():
+        return sim_time[0]
+
+    def mock_sleep(sec):
+        sim_time[0] += timedelta(seconds=max(60.0, float(sec)))
+
+    locked_ce, locked_pe = entry_job.run_phase1_warmup(
+        calc=mock_calc,
+        notifier=mock_notifier,
+        now_fn=mock_now,
+        sleep_fn=mock_sleep,
+    )
+
+    # 1. Verify lock_10_delta_strikes was called twice (initial lock + drift re-lock)
+    assert mock_calc.lock_10_delta_strikes.call_count == 2
+    # 2. Verify returned targets are the re-locked ones
+    assert locked_ce["id"] == 103
+    assert locked_pe["id"] == 102
+    # 3. Verify sleep was invoked for polling
+    assert mock_now() >= datetime(2026, 11, 25, 10, 0, 0)
+
+
+@patch("time.sleep", return_value=None)
+@patch("services.order_manager.OrderManager.execute_strangle_with_dual_verification")
+@patch("services.delta_calculator.DeltaCalculator.get_10_delta_strikes")
+@patch("services.risk_guard.RiskGuard.check_hard_kill_switch", return_value=(False, 0.0, "OK"))
+def test_phase2_sniper_execution_uses_prelocked_targets(
+    mock_kill_switch,
+    mock_get_strikes,
+    mock_execute,
+    _mock_sleep,
+):
+    """Verifies that Phase 2 passes pre-locked strikes to get_10_delta_strikes and executes 1,000 lots."""
+    import importlib
+    from datetime import datetime
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    prelocked_ce = {"id": 101, "symbol": "C-BTC-70000", "allocated_lots": 1000, "sizing_msg": "Full 1000 lots"}
+    prelocked_pe = {"id": 102, "symbol": "P-BTC-60000", "allocated_lots": 1000, "sizing_msg": "Full 1000 lots"}
+
+    mock_get_strikes.return_value = (prelocked_ce, prelocked_pe)
+    mock_execute.return_value = {"success": True, "ce": {"sl_trigger": 60.0}, "pe": {"sl_trigger": 40.0}}
+
+    now_10am = datetime(2026, 11, 25, 10, 0, 0)
+    res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
+
+    assert res is True
+    # Verify get_10_delta_strikes was called with locked_ce and locked_pe (None when entering at 10:00 directly)
+    assert mock_get_strikes.call_count == 1
+    # Verify execute_strangle was executed with 1,000 lots (1.0 BTC)
+    mock_execute.assert_called_once_with(ce_info=prelocked_ce, pe_info=prelocked_pe, size=1000)

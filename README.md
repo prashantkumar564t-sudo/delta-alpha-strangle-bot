@@ -368,8 +368,8 @@ To run fully autonomously without manual intervention, configure Termux's built-
 # ====================================================================
 # DELTA ALPHA STRANGLE AUTOMATION CRON (IST TIMEZONE)
 # ====================================================================
-# 10:00:00 AM IST - Morning Entry Job with 100% Combo A Bracket SL
-00 10 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py entry >> logs/entry.log 2>&1
+# 09:58:00 AM IST - 2-Phase Pre-Warm & Target Lock (Sniper Execution at 10:00:00 AM IST)
+58 09 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py entry >> logs/entry.log 2>&1
 
 # 10:00 - 17:00 IST - Cost-to-Cost Trail State Machine Monitor (Every 2 Mins)
 */2 10-17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py monitor >> logs/monitor.log 2>&1

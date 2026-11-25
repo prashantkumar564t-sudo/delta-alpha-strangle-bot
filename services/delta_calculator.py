@@ -274,42 +274,103 @@ class DeltaCalculator:
 
         return True, "All 4 Anti-Trap Liquidity Layers Passed", metrics
 
-    def get_10_delta_strikes(
+    def refresh_strike_quote(self, strike_info: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        Fetches live quotes and Greeks for a locked strike via direct public endpoint (0 KB proxy).
+        Updates mark_price, best_bid, best_ask, bid_size, delta, and abs_delta in a shallow copy.
+        """
+        if not strike_info or not strike_info.get("symbol"):
+            return None
+        symbol = strike_info["symbol"]
+        prod_id = strike_info.get("id")
+
+        resp = self.client.request_public("GET", f"/v2/tickers/{symbol}")
+        quotes = None
+        mark_price = None
+        greeks = None
+        if resp and resp.get("success"):
+            res = resp.get("result")
+            if isinstance(res, dict):
+                quotes = res.get("quotes")
+                mark_price = res.get("mark_price")
+                greeks = res.get("greeks")
+            elif isinstance(res, list):
+                for t in res:
+                    if t.get("product_id") == prod_id or t.get("symbol") == symbol:
+                        quotes = t.get("quotes")
+                        mark_price = t.get("mark_price")
+                        greeks = t.get("greeks")
+                        break
+        else:
+            all_resp = self.client.request_public("GET", "/v2/tickers")
+            if all_resp and all_resp.get("success"):
+                for t in all_resp.get("result", []):
+                    if t.get("product_id") == prod_id or t.get("symbol") == symbol:
+                        quotes = t.get("quotes")
+                        mark_price = t.get("mark_price")
+                        greeks = t.get("greeks")
+                        break
+
+        if not quotes:
+            return None
+
+        updated = dict(strike_info)
+        if mark_price is not None:
+            updated["mark_price"] = float(mark_price or 0.0)
+        updated["best_bid"] = float(quotes.get("best_bid") or 0.0)
+        updated["best_ask"] = float(quotes.get("best_ask") or 0.0)
+        updated["bid_size"] = float(quotes.get("bid_size") or 0.0)
+        if greeks and greeks.get("delta") is not None:
+            try:
+                updated["delta"] = float(greeks["delta"])
+                updated["abs_delta"] = abs(updated["delta"])
+            except (ValueError, TypeError):
+                pass
+        return updated
+
+    def check_delta_drift(self, strike_info: dict[str, Any] | None) -> bool:
+        """
+        Returns True if the strike's live delta remains within the institutional 0-DTE band [0.07, 0.13].
+        Returns False if delta drifted outside, signalling that target re-locking is required.
+        """
+        if not strike_info:
+            return False
+        abs_delta = strike_info.get("abs_delta")
+        if abs_delta is None:
+            delta = strike_info.get("delta")
+            if delta is not None:
+                abs_delta = abs(float(delta))
+        if abs_delta is None:
+            return False
+        return 0.07 <= abs_delta <= 0.13
+
+    def lock_10_delta_strikes(
         self,
         symbol: str = "BTC",
         target_delta: float = 0.10,
         expiry_date_str: str | None = None,
         target_lots: int = 1000,
         min_tradeable_lots: int = 100,
-        lot_size: int | None = None,
-        enable_anti_trap: bool = True,
-        max_spread_ratio: float = 0.080,
-        suppress_block_alert: bool = False,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """
-        Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
-        Applies Dynamic Liquidity-Aware Sizing (20% L1 footprint rule) and 4-Layer Anti-Trap Filter.
+        Scans today's 0-DTE option chain and locks the closest 10-Delta CE and PE contracts in memory.
+        Enforces 0.07 <= |delta| <= 0.13, mark >= $5.00, active bid/ask, and bid_size >= effective_min.
+        Does NOT execute orders or run 4-layer anti-trap; returns raw locked strike structures.
         """
-        if lot_size is not None:
-            target_lots = lot_size
         target_date_suffix = expiry_date_str or self.get_target_expiry_date_str()
-        print(f"[INFO] Looking for 0-DTE Expiry Date Suffix: {target_date_suffix}")
+        print(f"[INFO] Scanning 0-DTE chain for Expiry Date Suffix: {target_date_suffix}")
 
-        # 1. Tickers fetch karein via direct internet (request_public, 0 KB proxy bandwidth)
         tickers_resp = self.client.request_public("GET", "/v2/tickers")
         if not tickers_resp or not tickers_resp.get("success"):
             print(f"[ERROR] Failed to fetch tickers: {tickers_resp}")
             return None, None
 
         all_tickers = tickers_resp.get("result", [])
-
-        # 2. Products details fetch karein (with 12h local caching)
         products_list = self._get_products()
         if not products_list:
             return None, None
 
         products_map = {p["id"]: p for p in products_list}
-
         ce_candidates: list[dict[str, Any]] = []
         pe_candidates: list[dict[str, Any]] = []
         available_expiries: set[str] = set()
@@ -317,7 +378,6 @@ class DeltaCalculator:
         for ticker in all_tickers:
             prod_id = ticker.get("product_id")
             prod = products_map.get(prod_id)
-
             if not prod:
                 continue
 
@@ -329,12 +389,10 @@ class DeltaCalculator:
             if not symbol_name.startswith(("C-BTC-", "P-BTC-")):
                 continue
 
-            # Symbol ke aakhri 6 digit expiry date hote hain (DDMMYY)
             parts = symbol_name.split("-")
             if len(parts) >= 4:
                 available_expiries.add(parts[-1])
 
-            # Expiry date filter (Strictly target 0-DTE date suffix)
             if not symbol_name.endswith(target_date_suffix):
                 continue
 
@@ -349,8 +407,6 @@ class DeltaCalculator:
                 continue
 
             abs_delta = abs(raw_delta)
-
-            # --- SAFETY BOUND: Enforce 0.07 <= abs(delta) <= 0.13 ---
             if not (0.07 <= abs_delta <= 0.13):
                 continue
 
@@ -360,34 +416,25 @@ class DeltaCalculator:
             best_ask = float(quotes.get("best_ask") or 0.0)
             bid_size = float(quotes.get("bid_size") or 0.0)
 
-            # --- SPREAD & LIQUIDITY SANITY CHECKS ---
-            # 1. Enforce two-sided orderbook (reject one-sided or empty books)
             if best_bid <= 0.0 or best_ask <= 0.0:
                 continue
-
-            # 2. Enforce minimum $5.00 mark price threshold
             if mark_price < 5.0:
                 continue
 
-            # 3. Require active buyers in live orderbook with minimum bid floor
             is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
             min_bid = 1.0 if is_testnet else 5.0
             if best_bid < min_bid:
                 continue
 
-            # 4. Filter out contracts where spread / mark_price > 0.40 (excessive slippage protection)
             spread = best_ask - best_bid
             if (spread / mark_price) > 0.40:
                 continue
 
-            # 5. Depth check: Ensure orderbook has sufficient buyers for minimum tradeable lot size
             effective_min_depth = min(target_lots, min_tradeable_lots)
             if bid_size < float(effective_min_depth):
                 continue
 
-            # Extract contract tick_size for precise stop-loss rounding
             tick_size = float(prod.get("tick_size") or 0.1)
-
             candidate_info = {
                 "id": prod_id,
                 "symbol": symbol_name,
@@ -408,16 +455,13 @@ class DeltaCalculator:
                 pe_candidates.append(candidate_info)
 
         if not ce_candidates and not pe_candidates:
-            # Calendar-aware sorting for debug log
             valid_expiries = [e for e in available_expiries if parse_expiry_date(e) is not None]
             sorted_expiries = sorted(valid_expiries, key=lambda e: parse_expiry_date(e) or date.min)
             print(f"[DEBUG] Active Expiries found on Delta: {sorted_expiries}")
 
-        # 3. Target delta (0.10) ke sabse kareeb wali strike select karein
         best_ce = min(ce_candidates, key=lambda x: x["delta_diff"]) if ce_candidates else None
         best_pe = min(pe_candidates, key=lambda x: x["delta_diff"]) if pe_candidates else None
 
-        # 4. Strict 0-DTE Mandate: No forward expiry fallback
         if not best_ce or not best_pe:
             missing = []
             if not best_ce:
@@ -429,6 +473,65 @@ class DeltaCalculator:
                 f"({target_date_suffix}). Missing: {', '.join(missing)}. "
                 f"Strict 0-DTE mandate active — skipping session cleanly."
             )
+            return None, None
+
+        return best_ce, best_pe
+
+    def get_10_delta_strikes(
+        self,
+        symbol: str = "BTC",
+        target_delta: float = 0.10,
+        expiry_date_str: str | None = None,
+        target_lots: int = 1000,
+        min_tradeable_lots: int = 100,
+        lot_size: int | None = None,
+        enable_anti_trap: bool = True,
+        max_spread_ratio: float = 0.080,
+        suppress_block_alert: bool = False,
+        locked_ce: dict[str, Any] | None = None,
+        locked_pe: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """
+        Selects optimal 10-Delta Call and Put strikes strictly for today's 0-DTE expiry.
+        Supports 2-Phase pre-warm flow: if locked_ce and locked_pe are provided, directly audits
+        and sizes the pre-locked targets (refreshing quotes & re-locking only on delta drift).
+        Applies Dynamic Liquidity-Aware Sizing (20% L1 footprint rule) and 4-Layer Anti-Trap Filter.
+        """
+        if lot_size is not None:
+            target_lots = lot_size
+
+        best_ce = locked_ce
+        best_pe = locked_pe
+
+        # If pre-locked strikes are provided (e.g. from Phase 1), refresh their quotes directly
+        if best_ce and best_pe:
+            refreshed_ce = self.refresh_strike_quote(best_ce)
+            refreshed_pe = self.refresh_strike_quote(best_pe)
+            if refreshed_ce:
+                best_ce = refreshed_ce
+            if refreshed_pe:
+                best_pe = refreshed_pe
+
+            # Check delta drift: if either drifted outside [0.07, 0.13], re-lock
+            if not self.check_delta_drift(best_ce) or not self.check_delta_drift(best_pe):
+                print("[INFO] Pre-locked strike delta drifted outside [0.07, 0.13]. Re-locking targets from chain...")
+                best_ce, best_pe = self.lock_10_delta_strikes(
+                    symbol=symbol,
+                    target_delta=target_delta,
+                    expiry_date_str=expiry_date_str,
+                    target_lots=target_lots,
+                    min_tradeable_lots=min_tradeable_lots,
+                )
+        else:
+            best_ce, best_pe = self.lock_10_delta_strikes(
+                symbol=symbol,
+                target_delta=target_delta,
+                expiry_date_str=expiry_date_str,
+                target_lots=target_lots,
+                min_tradeable_lots=min_tradeable_lots,
+            )
+
+        if not best_ce or not best_pe:
             return None, None
 
         # 5. Dynamic Liquidity-Aware Sizing (20% L1 Footprint Rule) & 4-Layer Pre-Trade Anti-Trap Filter
