@@ -5,6 +5,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Termux%20Android%20%7C%20Linux%20VPS-blue?style=for-the-badge&logo=android&logoColor=white)](https://termux.dev)
 [![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Security](https://img.shields.io/badge/Auth-HMAC--SHA256%20%26%20Static%20Tunnel-red?style=for-the-badge)](core/api_client.py)
+[![Test Suite](https://img.shields.io/badge/Tests-46%20Passed%20%7C%20100%25-brightgreen?style=for-the-badge&logo=pytest)](tests/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
 > **An institutional-grade, fully automated 10-Delta Bitcoin (BTC) options selling bot engineered specifically for Delta Exchange. Runs 24/7 on Android Termux or bare-metal Linux VPS with ZERO external Python dependencies.**
@@ -24,7 +25,8 @@
   - [Whitelisting Proxy IP in Delta Exchange](#whitelisting-proxy-ip-in-delta-exchange)
 - [4. Step 3: Telegram Bot & Telemetry Setup](#4-step-3-telegram-bot--telemetry-setup)
 - [5. Step 4: Environment Variables & Security (`.env`)](#5-step-4-environment-variables--security-env)
-- [6. Step 5: Local Laptop Verification & Tests](#6-step-5-local-laptop-verification--tests)
+- [6. Step 5: Local Laptop Verification & Test Suite](#6-step-5-local-laptop-verification--test-suite)
+  - [Running Unit Tests (46 Tests)](#running-unit-tests-46-tests)
   - [Test 1: Authentication & Balance](#test-1-authentication--balance)
   - [Test 2: Telegram Alerts](#test-2-telegram-alerts)
   - [Test 3: End-to-End Live Execution Pipeline](#test-3-end-to-end-live-execution-pipeline)
@@ -44,17 +46,26 @@
 
 **Delta Alpha Strangle Bot** is an autonomous quantitative trading system designed to monetize intraday **Theta (Time Decay)** on daily Bitcoin (BTC) options traded on Delta Exchange India (`cdn-ind.testnet.deltaex.org` / `api.india.delta.exchange`).
 
-The bot strictly executes a **Pure Intraday Short Strangle (Combo A Architecture)** according to four core operational rules:
-1. **Pre-Trade 4-Layer Anti-Trap Liquidity Filter:** Before placing any order, validates candidate strikes across 4 institutional liquidity gates:
-   - *Layer 1 (Spread Ratio):* $\text{Spread} / \text{Mark} \le 0.035$ (3.5% maximum spread barrier).
-   - *Layer 2 (Depth Cushion):* $\text{Top Bid Lots} \ge \max(500,\, \text{Order Lots} \times 5)$ ($\ge 5\times$ order cushion or 500 lot min floor).
-   - *Layer 3 (Mark Discount):* $(\text{Mark} - \text{Best Bid}) / \text{Mark} \le 0.020$ (2.0% maximum discount).
+The bot strictly executes a **Pure Intraday Short Strangle (Combo A Architecture)** according to verified institutional rules:
+
+1. **2-Phase Entry Engine:**
+   - **Phase 1 (`09:58:00`–`09:59:59 IST`) — Pre-Warm Target Lock:** Scans the 0DTE option chain 2 minutes before market open. Selects candidate Call (CE) and Put (PE) strikes targeting Greek Delta $\approx 0.10$ within absolute bounds $[0.07, 0.13]$ and minimum mark price $\ge \$5.00$. Uses direct public REST endpoints (**0 KB proxy bandwidth consumed**). Emits Phase 1 Pre-Warm Telegram Telemetry to private chat and public channel. Continuously polls every 5s; if spot moves and delta drifts outside $[0.07, 0.13]$, automatically re-locks targets with an update alert.
+   - **Phase 2 (`10:00:00`–`10:02:00 IST`) — Sniper Execution Retry Loop:** At exactly 10:00:00 IST, executes candidate quotes against the 4-layer Anti-Trap liquidity filter. If orderbook spreads or depth are temporarily settling at market open, polls every 5 seconds for up to **120 seconds (24 attempts)** until both legs pass and execute cleanly.
+2. **Two-Stage Patience & Dynamic Equal-Leg Fallback Sizing:**
+   - **Stage 1 (`0s` to `90s` after 10:00:00 IST):** Mandatory **Full Target Patience**. Requires full `TARGET_LOTS` ($1,000\text{ lots} = 1.0\text{ BTC}$) on both legs under the **20% L1 Footprint Rule** ($\text{Top Bid Depth} \ge 5,000\text{ lots}$). Prevents premature auto-downsizing during early 10:00 AM market-maker quote placement.
+   - **Stage 2 (`90s` to `120s` after 10:00:00 IST):** **Dynamic Equal-Leg Fallback**. If full 1,000 lots are unavailable after 90s, dynamically sizes both legs to:
+     $$\text{equal\_lots} = \min(\text{safe\_call},\, \text{safe\_put},\, 1000)$$
+     Executes immediately if $\text{equal\_lots} \ge 500\text{ lots}$ ($0.5\text{ BTC}$). If depth yields $< 500\text{ lots}$ across the full 120s, entry is safely skipped with a Telegram notification.
+3. **Pre-Trade 4-Layer Anti-Trap Liquidity Filter:**
+   - *Layer 1 (Spread Ratio Gate):* $\text{Spread} / \text{Mark} \le 0.080$ ($8.0\%$ maximum spread cap, accommodating institutional 2-tick quotes on \$25–\$40 options).
+   - *Layer 2 (Depth Cushion):* Two-Stage allocation with $\text{Top Bid} \times 0.20$ footprint cap and 100-lot absolute tradeable floor.
+   - *Layer 3 (Mark Discount):* $(\text{Mark} - \text{Best Bid}) / \text{Mark} \le 0.020$ ($2.0\%$ maximum discount barrier).
    - *Layer 4 (2.5s Snapshot Stability):* Samples book twice 2.5s apart; rejects entry if Best Bid shifts $> 1.5\%$ or Top Bid lots drop $> 50\%$.
-2. **Entry (10:00 AM IST):** Scans the live option chain for BTC contracts expiring at 17:30 IST, selects Out-Of-The-Money (OTM) Call (CE) and Put (PE) strikes targeting Greek Delta $\approx 0.10$ ($\sim 90\%$ statistical OTM probability), and executes sequential market sell orders.
-3. **Risk Management (Combo A: 100% SL + Cost-to-Cost Trail):**
-   - Automatically attaches an initial 100% Stop-Market Bracket Stop-Loss ($\text{Real Entry Price} \times 2.00$) on each leg.
-   - **Cost-to-Cost Trail State Machine:** The instant either leg (CE or PE) triggers its 100% SL, the surviving leg's SL is immediately moved to its exact entry cost ($\text{Real Entry Price} \times 1.00$), locking in zero directional risk and delivering verified **+110.15% 6-day backtested net ROI** (vs. +48.24% with 75% static SL).
-4. **Exit (17:15 PM IST):** 15 minutes before the 17:30 IST exchange settlement, the exit engine executes an automated 3-attempt square-off loop, closes any remaining open positions at market, and purges all open orders, leaving the account **100% FLAT** overnight.
+4. **Risk Management (Combo A: 100% SL + Cost-to-Cost Trail):**
+   - Attaches an initial $+100\%$ Stop-Market Bracket Stop-Loss ($\text{Real Entry Price} \times 2.00$) on each leg.
+   - **Cost-to-Cost Trail State Machine:** Monitored every 2 minutes. The instant either leg (CE or PE) triggers its 100% SL, the surviving leg's SL is immediately moved to its exact entry cost ($\text{Real Entry Price} \times 1.00$), locking in zero directional risk (+110.15% backtested net ROI vs. +48.24% with 75% static SL).
+   - **Non-Blocking Drawdown Warning:** Evaluates cumulative peak-to-trough equity drawdown against the threshold ($\$1,185.00$). Sends an advisory Telegram warning (`⚠️ DRAWDOWN ALERT: Account drawdown exceeded threshold — strategy needs attention`) while allowing entry execution to continue uninterrupted.
+5. **Exit (`17:15:00 IST`):** 15 minutes before the 17:30 IST exchange settlement, executes an automated 3-attempt square-off loop, closes open positions via market buys, and purges all open orders, leaving the account **100% FLAT** overnight.
 
 ```
                            DELTA ALPHA BOT ARCHITECTURE
@@ -65,26 +76,27 @@ The bot strictly executes a **Pure Intraday Short Strangle (Combo A Architecture
         └───────────────────────────┬────────────────────────────┘
                                     │
                        HTTP / HTTPS Proxy Tunnel
+                     (Private Authenticated Calls)
                                     │
                                     ▼
-       ┌──────────────────────────────────────────────────────────┐
-       │     Dedicated Datacenter Proxy (e.g., 198.51.100.42)     │
-       │           (Bypasses Mobile CGNAT Dynamic IPs)            │
-       └────────────────────────────┬─────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────┐
+        │     Dedicated Datacenter Proxy (e.g., 198.51.100.42)     │
+        │           (Bypasses Mobile CGNAT Dynamic IPs)            │
+        └────────────────────────────┬─────────────────────────────┘
                                     │
                                     ▼
-       ┌──────────────────────────────────────────────────────────┐
-       │            Delta Exchange India / Global API             │
-       │             (IP-Whitelisted REST Gateway)                │
-       └──────────────────────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────────────────┐
+        │            Delta Exchange India / Global API             │
+        │             (IP-Whitelisted REST Gateway)                │
+        └──────────────────────────────────────────────────────────┘
 ```
 
 ### Core Philosophy: Zero External Dependencies
 Most algorithmic trading repositories rely heavily on third-party libraries such as `requests`, `urllib3`, `pandas`, `ccxt`, and `python-dotenv`. On mobile Linux environments like Android **Termux** or lightweight VPS instances, compiling and maintaining these dependencies often triggers C-extension build failures, memory crashes, or pip version breaks.
 
 This bot is engineered from the ground up to use **strictly Python's built-in standard library**:
-- `urllib.request` / `urllib.error`: Native HTTP/HTTPS network client with proxy authentication.
-- `hmac` & `hashlib`: Official Delta Exchange cryptographic HMAC-SHA256 signature generator.
+- `urllib.request` / `urllib.error`: Native HTTP/HTTPS network client with proxy authentication and direct public endpoints.
+- `hmac` & `hashlib`: Cryptographic HMAC-SHA256 signature generator.
 - `json`: Wire payload serialization matching signature bytes.
 - `time` & `datetime`: Unix epoch timestamps and IST (`UTC+5:30`) daily expiry calculations.
 - `os` & `sys`: Custom `.env` line parser supporting UTF-8 and Windows UTF-8 BOM encoding.
@@ -92,10 +104,10 @@ This bot is engineered from the ground up to use **strictly Python's built-in st
 `requirements.txt` is intentionally **empty** — clone the repo and run it immediately!
 
 ### High-Reliability Engineering Highlights
-1. **Static Datacenter Proxy Tunneling:** Routes all outgoing API traffic through a dedicated IP address (`urllib.request.ProxyHandler`), solving Delta's strict `ip_not_whitelisted_for_api_key` restrictions.
+1. **Static Datacenter Proxy Tunneling:** Routes private authenticated trading API traffic through a dedicated IP address (`urllib.request.ProxyHandler`), solving Delta's strict `ip_not_whitelisted_for_api_key` restrictions, while routing public market quotes directly to preserve proxy bandwidth.
 2. **Atomic Single-Leg Rollback:** If the Call (CE) sell fills but the Put (PE) sell gets rejected (due to margin, tick size, or network drop), the engine immediately triggers an emergency Market Buy order to close the naked CE leg, eliminating unhedged overnight exposure.
 3. **Dual-Settlement 10s Verifications:** Incorporates two deliberate 10-second countdown waits to allow exchange matching engines to settle fills before querying `/v2/positions` and `/v2/orders`.
-4. **3-Attempt Square-off Retry Engine:** The 17:15 IST exit job does not execute once and assume closure. It executes up to 3 purge-and-close cycles with 4-second backoffs, verifies positions count == 0, and dispatches a Critical Emergency Alarm to Telegram if any position remains open.
+4. **3-Attempt Square-off Retry Engine:** The 17:15 IST exit job executes up to 3 purge-and-close cycles with 4-second backoffs, verifies positions count == 0, and dispatches a Critical Emergency Alarm to Telegram if any position remains open.
 
 ---
 
@@ -106,7 +118,7 @@ Before risking real capital, test everything on the official Delta Exchange Test
 1. Navigate to the **Delta Exchange Testnet Portal**:
    - India Testnet: [https://cdn-ind.testnet.deltaex.org](https://cdn-ind.testnet.deltaex.org)
    - Global Testnet: [https://testnet.deltaex.org](https://testnet.deltaex.org)
-2. Log in (or register a demo account). Your demo account comes preloaded with virtual USDT/USD balances.
+2. Log in (or register a demo account). Virtual balances are preloaded.
 3. Navigate to **API Keys**:
    - Click on your **Profile Icon** (top right) -> **Settings** -> **API Management / API Keys**.
    - Click **Create New API Key**.
@@ -116,109 +128,106 @@ Before risking real capital, test everything on the official Delta Exchange Test
    - ⚠️ **CRITICAL SECURITY RULE:** **NEVER enable the "Withdrawal" permission** on any trading bot API key.
    - **IP Whitelist Field:** Leave blank for a moment (we will paste our static proxy IP from Step 2 here).
 5. Click **Generate API Key**.
-6. Immediately copy both the **API Key** and **API Secret** to a secure temporary notepad (Delta will only display the secret once).
+6. Copy both the **API Key** and **API Secret** to a secure temporary location.
 
 ---
 
 ## 3. Step 2: Webshare Static Proxy Setup (Bypassing Dynamic IP)
 
 ### Why a Static Proxy is Mandatory
-When running on mobile internet (Jio, Airtel, Vodafone) or home broadband, your Internet Service Provider uses **Carrier-Grade NAT (CGNAT)**. Your outbound public IP changes every few minutes or whenever your mobile radio reconnects.
+When running on mobile internet (Jio, Airtel, Vodafone) or home broadband, your Internet Service Provider uses **Carrier-Grade NAT (CGNAT)**. Your outbound public IP changes frequently.
 
 Delta Exchange enforces strict API security: if an API Key has IP Whitelisting enabled, an IP change immediately produces this fatal error:
 ```json
 [HTTP 401] {"error":{"code":"ip_not_whitelisted_for_api_key","context":{"client_ip":"..."}},"success":false}
 ```
-If you leave the API key without an IP whitelist, Delta enforces severe rate limits and security flags. By routing the bot through a permanent static datacenter proxy, your outbound IP **never changes**, regardless of whether your phone switches between 4G, 5G, or Wi-Fi.
+By routing the bot's private authenticated trading calls through a permanent static datacenter proxy, your outbound IP **never changes**, regardless of whether your phone switches between 4G, 5G, or Wi-Fi.
 
 ### ISP DNS Block Workaround (Jio / Airtel in India)
-In India, major ISPs occasionally block the domain `webshare.io` at the DNS level. If the site fails to load:
+If `webshare.io` fails to load due to ISP DNS blocking:
 1. On Android: Go to **Settings** -> **Network & Internet** -> **Private DNS**.
-2. Select **Private DNS provider hostname** and enter:
-   ```text
-   one.one.one.one
-   ```
-   *(or enter `dns.google`)*
-3. On Windows / Mac: Change your network adapter's DNS server to Cloudflare (`1.1.1.1`) or Google (`8.8.8.8`).
-4. Refresh your browser; [webshare.io](https://www.webshare.io) will open instantly.
+2. Select **Private DNS provider hostname** and enter `one.one.one.one` (or `dns.google`).
+3. On Windows / Mac: Change adapter DNS to Cloudflare (`1.1.1.1`) or Google (`8.8.8.8`).
 
 ### Obtaining Proxy Credentials
-1. Sign up for a free account at [https://www.webshare.io](https://www.webshare.io) (the free tier provides 10 free permanent proxies).
-2. Inside the Webshare dashboard, navigate to **Proxy** -> **Proxy List**.
-3. Under the list view, extract the 4 connection parameters:
-   - **Proxy IP (Host):** e.g., `198.51.100.42` *(dummy example)*
-   - **Port:** e.g., `8080` *(dummy example)*
-   - **Username:** e.g., `proxy_user_demo` *(dummy example)*
-   - **Password:** e.g., `proxy_pass_sample` *(dummy example)*
+1. Sign up for an account at [https://www.webshare.io](https://www.webshare.io) (free tier includes 10 proxies).
+2. Extract the connection parameters from the Webshare dashboard:
+   - **Proxy IP (Host):** e.g., `198.51.100.42`
+   - **Port:** e.g., `8080`
+   - **Username:** e.g., `proxy_user_demo`
+   - **Password:** e.g., `proxy_pass_sample`
 
 ### Whitelisting Proxy IP in Delta Exchange
-1. Return to your open **Delta Exchange API Keys** settings page.
-2. In the **IP Whitelist** input box, paste the exact **Proxy IP** you obtained from Webshare (e.g., `198.51.100.42`).
-3. Save the API Key. Now Delta will **ONLY** accept requests originating from this static IP address.
+1. In Delta Exchange API Keys settings, paste the **Proxy IP** (e.g., `198.51.100.42`) into the **IP Whitelist** input box.
+2. Save the API Key. Delta will now strictly accept authenticated calls originating from this static IP.
 
 ---
 
 ## 4. Step 3: Telegram Bot & Telemetry Setup
 
-The bot features an institutional **Dual-Broadcast Alerting Engine** built with Python's standard library (`urllib.request`).
+The bot features a standard-library **Dual-Broadcast Alerting Engine**:
 
 1. **Create the Telegram Bot:**
-   - Open Telegram and search for [@BotFather](https://t.me/BotFather).
-   - Send the message `/newbot`.
-   - Provide a display name (e.g., `My Delta Strangle Bot`) and a unique username ending in `bot` (e.g., `my_delta_strangle_alerts_bot`).
-   - BotFather will reply with your **HTTP API Token**:
-     ```text
-     1234567890:ABCdefGhIJKlmNoPQRstuVWXyz
-     ```
-   - Copy this token; this is your `TELEGRAM_BOT_TOKEN`.
-2. **Retrieve your Admin Chat ID (`TELEGRAM_CHAT_ID`):**
-   - In Telegram, search for [@userinfobot](https://t.me/userinfobot) and tap `/start`.
-   - It will reply with your personal numeric **Id** (e.g., `987654321`).
-   - Copy this number; this is your `TELEGRAM_CHAT_ID`.
-3. **Optional Public/Community Channel (`TELEGRAM_CHANNEL_ID`):**
-   - Create a read-only Telegram Channel for verified community alerts.
-   - Add your bot as an **Administrator** with permission `Post Messages`.
-   - Forward any message from the channel to [@userinfobot](https://t.me/userinfobot) or use web Telegram to copy the numeric ID (prefixed with `-100`, e.g., `-1002345678901`).
+   - In Telegram, open [@BotFather](https://t.me/BotFather) and send `/newbot`.
+   - Copy the HTTP API token (`TELEGRAM_BOT_TOKEN`).
+2. **Retrieve Admin Chat ID (`TELEGRAM_CHAT_ID`):**
+   - Open [@userinfobot](https://t.me/userinfobot) and tap `/start` to copy your numeric ID.
+3. **Optional Public Channel (`TELEGRAM_CHANNEL_ID`):**
+   - Add your bot as an Administrator with permission `Post Messages`.
    - Set `TELEGRAM_CHANNEL_ID=-100...` in your `.env`.
-4. **Dual-Broadcast Isolation Invariant:**
-   - **Trade Alerts (Broadcast to Both DM & Channel):** Clean execution alerts (Template 1 Entry, Template 2 Anti-Trap Shield, Template 3 Cost Trail, and Template 4 17:15 Session Scorecard) are broadcast to both your private DM and public channel.
-   - **System Errors & Tracebacks (Strictly Admin DM):** Connection retries, execution warnings, and unhandled tracebacks are strictly routed to `TELEGRAM_CHAT_ID` only.
-
-### 4 Institutional Alert Templates
-
-| Template | Triggering Job | Contents |
-| :--- | :--- | :--- |
-| **Template 1 — Entry Executed** | `1_entry_job.py` | Date/IST Time, Spot, Target vs. Allocated Lots (20% L1 Downsizing alert), L1 Bid Depth & Spread %, Strikes, Entry prices, 100% SL levels, Total Credit, and Trail Monitor status. |
-| **Template 2 — Anti-Trap Shield** | `services/delta_calculator.py` | Triggered Layer (`Spread > 3.5%`, `Depth < 500`, `Mark Gap > 2%`, or `2.5s Drift`), contract symbol, exact violation reason, and live orderbook metrics. |
-| **Template 3 — Cost Trail Activated** | `services/order_manager.py` | Breached leg exit price & PnL, surviving leg's new breakeven SL (`1.0x entry_price`), order ID, and risk-free status. |
-| **Template 4 — 17:15 Session Scorecard**| `2_exit_job.py` | Outcome Classification (Type 1 Full Decay, Type 2 Runner Survived, Type 3 Cost Trailed, Type 5 Double SL), leg PnL, Gross PnL, 4.13% fees, and Net Realized PnL. |
+4. **Dual-Broadcast Routing Invariants:**
+   - **Trade Alerts (Broadcast to Both DM & Channel):**
+     - Phase 1 Pre-Warm Lock Telemetry (`09:58:00 IST`).
+     - Template 1: Strangle Entry Executed (`10:00:00 IST`) with sizing, fill delay, L1 depth, and 100% SLs.
+     - Template 2: Anti-Trap Shield Blocks (`Spread > 8.0%`, `Depth < 500`, `Mark Gap > 2%`, `2.5s Drift`).
+     - Template 3: Cost-to-Cost Trail Activated (`Surviving leg moved to 1.0x entry cost`).
+     - Template 4: 17:15 IST Daily Session Scorecard (Gross PnL, 4.13% fees, and Net Realized PnL).
+   - **System Errors & Warnings (Strictly Isolated to Admin DM):**
+     - Drawdown Advisory Warnings (`⚠️ DRAWDOWN ALERT`).
+     - Connection retries, execution warnings, and unhandled tracebacks are strictly routed to `TELEGRAM_CHAT_ID` only.
 
 ---
 
 ## 5. Step 4: Environment Variables & Security (`.env`)
 
-In the project root, configuration is handled via `.env`.
+Configuration is managed via `.env`.
 
 ### 1. The Template File (`.env.example`)
-This file is tracked by Git and contains dummy placeholders for public reference:
-
 ```ini
 # Delta Exchange Credentials
 DELTA_API_KEY=your_delta_api_key_here
 DELTA_API_SECRET=your_delta_api_secret_here
 DELTA_BASE_URL=https://cdn-ind.testnet.deltaex.org
 
-# Position Sizing & Dynamic Liquidity Allocation
+# Position Sizing & Two-Stage Allocation
 TARGET_LOTS=1000
 MIN_TRADEABLE_LOTS=100
+FULL_TARGET_WAIT_SECONDS=90
+MIN_FALLBACK_LOTS=500
 LOT_SIZE=1000
+DEFAULT_LEVERAGE=40
+
+# Entry Timing & Liquidity Parameters
+WARMUP_START_HOUR=9
+WARMUP_START_MINUTE=58
+EXECUTION_HOUR=10
+EXECUTION_MINUTE=0
+WARMUP_POLL_INTERVAL_SECONDS=5
+MAX_SPREAD_RATIO=0.080
+ENTRY_WINDOW_SECONDS=120
+ENTRY_RETRY_INTERVAL_SECONDS=5
+
+# Combo A Stop-Loss & Risk Management
+SL_MULTIPLIER=2.00
+COST_TRAIL_MULTIPLIER=1.00
+HARD_KILL_SWITCH_USD=1185.00
 
 # Telegram Alerts & Dual-Broadcast
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TELEGRAM_CHAT_ID=your_telegram_chat_id_here
-TELEGRAM_CHANNEL_ID=your_telegram_channel_id_here # Optional (e.g. -100xxxxxxxxxx for public channel)
+TELEGRAM_CHANNEL_ID=your_telegram_channel_id_here # Optional (e.g. -100xxxxxxxxxx)
 
-# Static Proxy Credentials (Example Placeholders)
+# Static Proxy Credentials
 PROXY_HOST=198.51.100.42
 PROXY_PORT=8080
 PROXY_USER=proxy_user_demo
@@ -226,195 +235,135 @@ PROXY_PASS=proxy_pass_sample
 ```
 
 ### 2. Creating your Local `.env`
-Create your personal `.env` by copying the template:
-
 ```bash
-# On Linux / Termux / macOS:
 cp .env.example .env
-
-# On Windows PowerShell:
-Copy-Item .env.example .env
 ```
-
-Open `.env` in a text editor (`nano .env` or Notepad) and paste your real credentials.
-
-### 3. Repository Leak Protection
-The included `.gitignore` strictly blocks `.env`, runtime state, and logs from being committed:
-```gitignore
-.env
-.env.*
-!.env.example
-data/state.json
-logs/
-*.log
-__pycache__/
-```
-Verify with `git status` that `.env` never shows up as an untracked or staged file.
+Open `.env` in your editor and paste your credentials. `.gitignore` protects `.env` from being committed.
 
 ---
 
-## 6. Step 5: Local Laptop Verification & Tests
+## 6. Step 5: Local Laptop Verification & Test Suite
 
-Before moving to mobile Termux, run the three standalone test utilities on your computer.
+### Running Unit Tests (46 Tests)
+The repository includes a comprehensive 46-test test suite verifying all execution flows, anti-trap filters, two-stage sizing, error routing, and alert templates:
+
+```bash
+python -m pytest -v
+```
+*Expected Output:*
+```text
+============================= 46 passed in 0.35s ==============================
+```
 
 ### Test 1: Authentication & Balance
-Verifies that your static proxy tunnel functions and Delta recognizes your IP whitelist:
+Verifies static proxy tunnel and Delta API key authentication:
 ```bash
 python tests/test_auth.py
 ```
-*Expected Output:*
-```text
-[*] Proxy Enabled: 198.51.100.42:8080
-Connecting to: https://cdn-ind.testnet.deltaex.org/v2/wallet/balances
-
-[SUCCESS] Demo Account Authenticated!
-Response: True
- - Asset: USD | Balance: 199.829993
-```
 
 ### Test 2: Telegram Alerts
-Verifies that your Telegram Bot token and Chat ID are communicating properly:
+Verifies delivery to private admin chat and public channel:
 ```bash
 python tests/test_telegram.py
 ```
-*Expected Output:*
-```text
-Checking Telegram Configuration...
-Bot Token: Configured (12345678...)
-Chat ID:   987654321
-
-Sending test message to Telegram...
-[SUCCESS] Message successfully delivered to Telegram!
-```
-*(Check your Telegram app for the test notification).*
 
 ### Test 3: End-to-End Live Execution Pipeline
-Runs a complete simulated trade cycle: selects 10-Delta strikes -> sells 1 lot CE & PE -> attaches 100% Combo A Bracket SL -> holds for 120 seconds -> executes auto square-off:
+Runs a complete simulated trade cycle (Select 10-Delta -> Sell 1 lot -> Attach 100% SL -> 120s hold -> Auto square-off):
 ```bash
 python tests/test_live_execution.py
-```
-*Expected Output:*
-```text
-[STEP 1] Selected CE: C-BTC-75400-121126 | Selected PE: P-BTC-72000-121126
-[STEP 2] CE SOLD (Order ID: ...) | PE SOLD (Order ID: ...)
-         Real Fills: CE = 44.0 USD, PE = 101.3 USD
-         Attached 100% Combo A Bracket SLs: CE @ 88.0 USD, PE @ 202.6 USD (Verified Active ✅)
-[STEP 3] Holding positions... 120 seconds countdown.
-[STEP 4] Initiating square-off: Orders cancelled, positions bought back.
-         Verification: 0 Open Orders, 0 Open Positions remaining (100% FLAT ✅)
 ```
 
 ---
 
 ## 7. Step 6: Complete Mobile (Termux) Installation & Setup
 
-Turn any spare or primary Android phone into a 24/7 dedicated low-power trading server.
+Turn any Android phone into a 24/7 dedicated low-power trading server.
 
 ### Step 1: Install Termux via F-Droid
-> ⚠️ **DO NOT install Termux from Google Play Store** (the Play Store build is obsolete and fails to fetch package repositories).
-- Download and install the latest APK from **[F-Droid](https://f-droid.org/packages/com.termux/)** or **[Termux GitHub Releases](https://github.com/termux/termux-app/releases)**.
+> ⚠️ **DO NOT install Termux from Google Play Store** (Play Store build is obsolete).
+Download from **[F-Droid](https://f-droid.org/packages/com.termux/)** or **[GitHub Releases](https://github.com/termux/termux-app/releases)**.
 
 ### Step 2: Install Packages & Prevent Sleep
-Open Termux and run the following commands sequentially:
-
 ```bash
-# Update package repositories
 pkg update && pkg upgrade -y
-
-# Install Git, Python, Cronie, and Termux API
 pkg install git python cronie termux-api nano -y
-
-# Prevent Android CPU sleep while running in background
 termux-wake-lock
 ```
-*(A persistent Android notification will appear confirming Termux wake-lock is active).*
 
 ### Step 3: Clone Repository & Configure Environment
 ```bash
-# Navigate to home directory
 cd ~
-
-# Clone the repository
 git clone https://github.com/your-username/delta-alpha-strangle-bot.git
 cd delta-alpha-strangle-bot
-
-# Setup .env
 cp .env.example .env
 nano .env
 ```
-In `nano`, use the volume keys/touch controls to paste your real credentials. Press `Ctrl + O` and `Enter` to save, then `Ctrl + X` to exit.
 
 ### Step 4: Verify Connectivity on Termux
 ```bash
 python tests/test_auth.py
 python tests/test_telegram.py
+pytest -v
 ```
-If both tests print `[SUCCESS]`, your mobile terminal is ready for autonomous production scheduling.
 
 ---
 
 ## 8. Step 7: Production Scheduling via Crontab (Cronie)
 
 ### Crontab Configuration
-To run fully autonomously without manual intervention, configure Termux's built-in cron daemon (`cronie`).
+Configure Termux's built-in cron daemon (`cronie`):
 
-1. Open crontab editor:
-   ```bash
-   crontab -e
-   ```
-2. Paste the following schedule:
+```bash
+crontab -e
+```
+
+Paste the production schedule:
 
 ```cron
 # ====================================================================
 # DELTA ALPHA STRANGLE AUTOMATION CRON (IST TIMEZONE)
 # ====================================================================
 # 09:58:00 AM IST - 2-Phase Pre-Warm & Target Lock (Sniper Execution at 10:00:00 AM IST)
-58 09 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py entry >> logs/entry.log 2>&1
+58 9 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && /data/data/com.termux/files/usr/bin/python3 main.py entry >> logs/entry.log 2>&1
 
 # 10:00 - 17:00 IST - Cost-to-Cost Trail State Machine Monitor (Every 2 Mins)
-*/2 10-17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py monitor >> logs/monitor.log 2>&1
+*/2 10-17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && /data/data/com.termux/files/usr/bin/python3 main.py monitor >> logs/monitor.log 2>&1
 
 # 05:15:00 PM IST - Guaranteed Exit, 3-Attempt Retry & Flat Audit
-15 17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && python3 main.py exit >> logs/exit.log 2>&1
+15 17 * * * cd /data/data/com.termux/files/home/delta-alpha-strangle-bot && /data/data/com.termux/files/usr/bin/python3 main.py exit >> logs/exit.log 2>&1
 ```
 
-3. Save and exit (`Ctrl + O`, `Enter`, `Ctrl + X`).
-4. Start the cron daemon:
-   ```bash
-   crond
-   ```
-5. Ensure `crond` auto-starts whenever Termux launches:
-   ```bash
-   echo "crond" >> ~/.bashrc
-   ```
+Start the daemon and ensure it auto-starts:
+```bash
+crond
+echo "crond" >> ~/.bashrc
+```
 
 ### Android Battery Optimization Bypass
-Android OS aggressive battery managers terminate background apps unless explicitly exempted:
-1. Open Android **Settings** -> **Apps** -> **Termux**.
-2. Tap **Battery** -> Select **"Unrestricted"** (Disable battery optimization).
-3. If your phone has an app lock / task manager, lock Termux in memory so it is not cleared when tapping "Clear All Apps".
+1. Android **Settings** -> **Apps** -> **Termux** -> **Battery** -> Select **"Unrestricted"**.
+2. Lock Termux in recent apps so memory cleaners do not kill the process.
 
 ### Live Log Monitoring
-To inspect live trade execution on your phone:
 ```bash
-tail -f ~/delta-alpha-strangle-bot/logs/trading.log
+tail -f ~/delta-alpha-strangle-bot/logs/entry.log
+tail -f ~/delta-alpha-strangle-bot/logs/monitor.log
 ```
 
 ---
 
 ## 9. Strategy & Operational Logic
 
-For a deep mathematical, quantitative, and operational breakdown of the trading system, refer to the companion specification document:
+For a deep mathematical and quantitative specification of the trading system, refer to:
 
 👉 **[STRANGLE_STRATEGY.md](STRANGLE_STRATEGY.md)**
 
-Key strategy mechanics include:
-- **10:00 AM IST Entry:** Selling 10-Delta OTM Call and Put options 7.5 hours prior to the 17:30 IST daily settlement.
-- **Liquidity & Spread Sanity Filters:** Filtering out dead bids (`best_bid <= 0`), sub-\$5 premiums (`mark_price < 5.0`), and wide spreads (`spread / mark_price > 0.40`).
-- **Atomic Rollback Engine:** Automatic emergency market buy of Leg 1 if Leg 2 fails execution.
-- **Combo A Stop-Loss & Cost Trail:** Immediate placement of an independent $+100\%$ ($2.0\times$ entry price) Stop-Market Bracket order on each leg. The instant one leg triggers its SL, the surviving leg is automatically trailed to its exact entry cost ($1.0\times$), locking in zero directional risk.
-- **17:15 PM IST Guaranteed Exit:** Triple-pass square-off loop closing all remaining open positions and cancelling all pending orders to guarantee a 100% flat portfolio.
-- **Hard Strategy Kill-Switch:** Automated pre-flight check halting execution if cumulative peak-to-trough live drawdown exceeds \$1,185.00 USD.
+Key mechanics:
+- **2-Phase Entry:** Pre-warm target lock at 09:58 IST, sniper retry execution over 120s at 10:00 IST.
+- **Two-Stage Sizing:** Stage 1 (0–90s) full 1,000 lots patience; Stage 2 (90–120s) dynamic equal-leg fallback down to 500 lots.
+- **4-Layer Anti-Trap Filter:** Spread cap $\le 8.0\%$, Top Bid depth $\times 0.20$, Mark-to-Bid discount $\le 2.0\%$, and 2.5s snapshot stability.
+- **Atomic Single-Leg Rollback:** Immediate emergency market buy if Leg 2 fails execution.
+- **Combo A 100% Bracket SL + Cost Trail:** 2.0x entry stop loss, trailed to 1.0x cost on the surviving leg when one leg stops out.
+- **17:15 IST Guaranteed Square-off:** 3-attempt purge loop ensuring 100% flat position overnight.
 
 ---
 
@@ -425,17 +374,19 @@ delta-alpha-strangle-bot/
 ├── .env.example              # Public configuration template with dummy placeholders
 ├── .gitignore                # Protects .env, state, cache, and logs from Git tracking
 ├── README.md                 # Complete operational manual (this file)
+├── ROADMAP.md                # Strategic production scaling & milestone roadmap
 ├── STRANGLE_STRATEGY.md      # Quantitative strategy & risk engine specification
 ├── requirements.txt          # Intentionally empty (100% Python Standard Library)
+├── ruff.toml                 # Code linter & formatter configuration
 ├── main.py                   # Master CLI entrypoint router
 │
 ├── config/
 │   ├── __init__.py
-│   └── settings.py           # Standard library .env loader & static proxy tunnel setup
+│   └── settings.py           # Standard library .env loader, proxy setup & constants
 │
 ├── core/
 │   ├── __init__.py
-│   └── api_client.py         # Native urllib client with HMAC-SHA256 signature generator
+│   └── api_client.py         # Native urllib client with HMAC-SHA256 & isolated proxy
 │
 ├── data/
 │   ├── state.json            # Dynamic runtime state recording active trades and stops
@@ -443,36 +394,41 @@ delta-alpha-strangle-bot/
 │
 ├── jobs/
 │   ├── __init__.py
-│   ├── 1_entry_job.py        # 10:00 AM IST Entry & 100% Combo A Bracket SL job
+│   ├── 1_entry_job.py        # 2-Phase 09:58 Pre-Warm & 10:00 Two-Stage Sniper Entry
 │   ├── 2_exit_job.py         # 17:15 PM IST Auto Square-off & Flat Verification job
-│   └── 3_monitor_job.py      # Combo A Cost-to-Cost Trail state monitor job
+│   └── 3_monitor_job.py      # Combo A Cost-to-Cost Trail state monitor daemon
 │
 ├── logs/
-│   └── .gitkeep              # Log output directory (trading.log)
+│   └── .gitkeep              # Log output directory (entry.log, monitor.log, exit.log)
 │
 ├── services/
 │   ├── __init__.py
-│   ├── delta_calculator.py   # Greeks parser, 10-Delta selection, and liquidity filters
-│   ├── notifier.py           # Pure urllib Telegram messaging client
-│   └── order_manager.py      # Dual-verification orders, atomic rollback, and retry engine
+│   ├── delta_calculator.py   # Greeks parser, 10-Delta selection, 4 Anti-Trap layers
+│   ├── order_manager.py      # Dual-verification orders, atomic rollback, bracket SLs
+│   ├── risk_guard.py         # Non-blocking drawdown calculation & advisory alert
+│   └── telegram_notifier.py  # Dual-broadcast Telegram client with 4 templates + telemetry
 │
 └── tests/
     ├── __init__.py
-    ├── test_auth.py          # Validates proxy tunnel and Delta wallet balance
-    ├── test_telegram.py      # Validates Telegram Bot connectivity
-    └── test_live_execution.py# Full pipeline test (Entry -> SL -> 120s hold -> Square-off)
+    ├── test_combo_a_anti_trap.py         # Anti-Trap 4-layer validation & sizing tests
+    ├── test_execution_flow.py            # 2-Phase entry, two-stage patience, fallback tests
+    ├── test_proxy_and_monitor_guard.py   # Proxy isolation & monitor job state tests
+    ├── test_risk_guard_and_crash_alert.py# Drawdown warning & crash alert tests
+    ├── test_telegram_templates.py        # Telegram formatting & routing tests
+    ├── test_auth.py                      # Validates proxy tunnel and Delta wallet balance
+    ├── test_telegram.py                  # Validates Telegram Bot connectivity
+    └── test_live_execution.py            # Full simulated pipeline test
 ```
 
 ---
 
 ## 11. Risk Disclaimer & Safety Rules
 
-> **⚠️ FINANCIAL DISCLAIMER:** Options selling involves substantial risk of loss and is not suitable for every investor. While this software incorporates an automated $+75\%$ Stop-Market Bracket Shield, Atomic Single-Leg Rollback, and mandatory 17:15 IST square-offs, unexpected exchange outages, high network latency, or market black-swan spikes can result in financial loss.
+> **⚠️ FINANCIAL DISCLAIMER:** Options selling involves substantial risk of loss. While this software incorporates an automated $+100\%$ Stop-Market Bracket Shield, Atomic Single-Leg Rollback, and mandatory 17:15 IST square-offs, exchange outages or extreme volatility spikes can result in financial loss.
 >
 > 1. Always validate your setup on **Delta Exchange Testnet** before deploying live capital.
-> 2. Ensure your account maintains adequate margin cushion to avoid liquidation during intraday volatility.
+> 2. Ensure adequate margin cushion (40x Cross Margin / Portfolio Margin recommended).
 > 3. Never commit or expose your real `.env` file or API secrets.
-> 4. The authors and contributors assume no liability for financial outcomes resulting from the use of this software.
 
 ---
 
