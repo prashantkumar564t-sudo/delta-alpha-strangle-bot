@@ -57,18 +57,16 @@ def run():
         ledger_path=ledger_path,
     )
     if is_breached:
-        kill_alert = (
-            "🚨🚨 *[HARD STRATEGY KILL-SWITCH TRIGGERED]* 🚨🚨\n\n"
+        warning_alert = (
+            "⚠️ *DRAWDOWN ALERT: Account drawdown exceeded threshold — strategy needs attention*\n\n"
             f"🕒 *Timestamp:* `{datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}`\n"
-            f"🛑 *Live Drawdown:* `-${current_dd:.2f} USD` (Limit: `-${HARD_KILL_SWITCH_USD:.2f} USD`)\n"
-            "🛡️ *Action:* 10:00 AM Entry HALTED automatically to preserve capital.\n"
-            f"📋 *Details:* {reason}\n\n"
-            "👉 *Please review strategy performance ledger before resuming live execution.*"
+            f"🛑 *Live Drawdown:* `-${current_dd:.2f} USD` (Threshold: `-${HARD_KILL_SWITCH_USD:.2f} USD`)\n"
+            "ℹ️ *Status:* Advisory Warning only — Entry proceeding as scheduled.\n"
+            f"📋 *Details:* {reason}"
         )
-        print(f"\n[KILL-SWITCH HALT] {reason}")
-        print(kill_alert)
-        notifier.send_system_error(kill_alert)
-        return
+        print(f"\n[DRAWDOWN WARNING] {reason}")
+        print(warning_alert)
+        notifier.send_message(warning_alert, is_trade_alert=False)
 
     target_lots = TARGET_LOTS
     min_tradeable_lots = MIN_TRADEABLE_LOTS

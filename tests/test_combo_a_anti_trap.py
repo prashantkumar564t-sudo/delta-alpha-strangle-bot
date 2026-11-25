@@ -27,7 +27,7 @@ def test_anti_trap_layer1_max_spread_barrier():
         "success": True,
         "result": {"quotes": {"best_bid": "98.5", "best_ask": "101.5", "bid_size": "600"}},
     }
-    ok, reason, metrics = calc.check_anti_trap_liquidity(
+    ok, _reason, metrics = calc.check_anti_trap_liquidity(
         product_id=1,
         symbol="C-BTC-100-TEST",
         mark_price=100.0,
@@ -39,6 +39,41 @@ def test_anti_trap_layer1_max_spread_barrier():
     )
     assert ok is True
     assert metrics["spread_ratio"] <= 0.035
+
+
+def test_1_lot_fixed_order_passes_liquidity():
+    """Verifies that a 1-lot fixed order with modest depth passes Layer 2 and dynamic sizing cleanly."""
+    mock_client = MagicMock()
+    calc = DeltaCalculator(mock_client)
+
+    # 1. Dynamic sizing for 1 lot: even with bid_size=10, 10 * 0.20 = 2 >= effective_min (1)
+    lots, msg = calc.calculate_liquidity_aware_lots(
+        call_bid_size=10.0,
+        put_bid_size=15.0,
+        target_lots=1,
+        min_tradeable_lots=100,
+    )
+    assert lots == 1
+    assert "Full allocation: 1 / 1 lots" in msg
+
+    # 2. Layer 2 anti-trap check for 1 lot order with bid_size=10.0
+    mock_client.request_public.return_value = {
+        "success": True,
+        "result": {"quotes": {"best_bid": "99.0", "best_ask": "101.0", "bid_size": "10.0"}},
+    }
+    ok, _reason, metrics = calc.check_anti_trap_liquidity(
+        product_id=1,
+        symbol="C-BTC-100-TEST",
+        mark_price=100.0,
+        best_bid=99.0,
+        best_ask=101.0,
+        bid_size=10.0,
+        order_lots=1,
+        min_tradeable_lots=100,
+        sleep_fn=None,
+    )
+    assert ok is True
+    assert metrics["safe_lots"] == 1
 
     # Failing case: Spread = 4.5, Mark = 100.0 -> 4.5% > 3.5%
     ok, reason, _metrics = calc.check_anti_trap_liquidity(
@@ -286,7 +321,7 @@ def test_anti_trap_blocks_get_10_delta_strikes_with_telegram():
     ]
     mock_client.request_public.return_value = {"success": True, "result": mock_tickers}
 
-    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1, enable_anti_trap=True)
+    ce, pe = calc.get_10_delta_strikes(symbol="BTC", target_delta=0.10, lot_size=1000, enable_anti_trap=True)
     assert ce is None
     assert pe is None
     # Must send Telegram block alert

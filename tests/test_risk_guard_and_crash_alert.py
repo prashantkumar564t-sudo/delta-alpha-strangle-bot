@@ -108,3 +108,35 @@ def test_telegram_crash_alert_formatter():
     assert "TypeError" in msg
     assert "services/delta_calculator.py:370" in msg
     assert "aborted safely" in msg
+
+
+def test_entry_job_non_blocking_drawdown_warning(monkeypatch):
+    """Verifies that drawdown breach triggers an advisory alert without blocking entry job execution."""
+    import importlib
+    from unittest.mock import patch
+
+    entry_job = importlib.import_module("jobs.1_entry_job")
+
+    mock_send = MagicMock()
+    mock_strikes = MagicMock(return_value=(None, None))
+
+    with (
+        patch.object(
+            entry_job.RiskGuard, "check_hard_kill_switch", return_value=(True, 1250.0, "Test DD breach $1250")
+        ),
+        patch.object(entry_job.TelegramNotifier, "send_message", mock_send),
+        patch.object(entry_job.DeltaCalculator, "get_10_delta_strikes", mock_strikes),
+    ):
+        entry_job.run()
+
+    # Verify advisory warning was sent
+    assert mock_send.call_count >= 1
+    first_call_args, first_call_kwargs = mock_send.call_args_list[0]
+    alert_text = first_call_args[0]
+    assert "DRAWDOWN ALERT" in alert_text
+    assert "1250.00" in alert_text
+    assert "Advisory Warning only" in alert_text
+    assert first_call_kwargs.get("is_trade_alert") is False
+
+    # Crucially verify get_10_delta_strikes WAS called (execution was NOT blocked/halted!)
+    mock_strikes.assert_called_once()

@@ -105,20 +105,23 @@ class DeltaCalculator:
     ) -> tuple[int, str]:
         """
         20% L1 Footprint Rule for Dynamic Liquidity-Aware Sizing:
+        - effective_min = min(target_lots, min_tradeable_lots)
         - safe_call_lots = min(target_lots, int(call_bid_size * 0.20))
         - safe_put_lots = min(target_lots, int(put_bid_size * 0.20))
         - final_lots = min(safe_call_lots, safe_put_lots)
-        Blocks trade if final_lots < min_tradeable_lots (100 lots, i.e., bid depth < 500 lots).
+        Blocks trade if final_lots < effective_min.
         """
+        effective_min = min(target_lots, min_tradeable_lots)
         safe_call = min(target_lots, int(float(call_bid_size) * 0.20))
         safe_put = min(target_lots, int(float(put_bid_size) * 0.20))
         final_lots = min(safe_call, safe_put)
 
-        if final_lots < min_tradeable_lots:
+        if final_lots < effective_min:
             min_depth_seen = min(float(call_bid_size), float(put_bid_size))
+            required_depth = effective_min * 5
             msg = (
-                f"Blocked: Safe executable lots ({final_lots}) below MIN_TRADEABLE_LOTS ({min_tradeable_lots}). "
-                f"L1 Bid Depth (Call: {call_bid_size:.0f}, Put: {put_bid_size:.0f}, min: {min_depth_seen:.0f}) < 500 required."
+                f"Blocked: Safe executable lots ({final_lots}) below MIN_TRADEABLE_LOTS ({effective_min}). "
+                f"L1 Bid Depth (Call: {call_bid_size:.0f}, Put: {put_bid_size:.0f}, min: {min_depth_seen:.0f}) < {required_depth} required."
             )
             return final_lots, msg
 
@@ -127,7 +130,7 @@ class DeltaCalculator:
             limiting_depth = call_bid_size if limiting_leg == "Call" else put_bid_size
             msg = f"Adjusted Lots: {final_lots} / {target_lots} due to L1 Bid Depth = {limiting_depth:,.0f}"
         else:
-            msg = f"Full allocation: {final_lots} / {target_lots} lots (L1 Bid Depth >= 5,000 lots)"
+            msg = f"Full allocation: {final_lots} / {target_lots} lots (L1 Bid Depth >= {target_lots * 5:,} lots)"
 
         return final_lots, msg
 
@@ -182,28 +185,26 @@ class DeltaCalculator:
         # Layer 2: 20% L1 Footprint Rule (Dynamic Liquidity-Aware Sizing)
         metrics["target_lots"] = order_lots
         metrics["min_tradeable_lots"] = min_tradeable_lots
+        effective_min = min(order_lots, min_tradeable_lots)
+        min_required_depth = float(effective_min * 5)
 
-        if bid_size < 500.0:
+        if bid_size < min_required_depth:
             safe_lots = int(float(bid_size) * 0.20)
             metrics["safe_lots"] = safe_lots
             reason = (
-                f"Layer 2 Failed: Top Bid depth {bid_size:.1f} < 500 lots required under 20% L1 footprint rule "
-                f"(yields {safe_lots} < MIN_TRADEABLE_LOTS {min_tradeable_lots})"
+                f"Layer 2 Failed: Top Bid depth {bid_size:.1f} < {min_required_depth:.0f} lots required under 20% L1 footprint rule "
+                f"(yields {safe_lots} < MIN_TRADEABLE_LOTS {effective_min})"
             )
             return False, reason, metrics
 
-        if order_lots >= min_tradeable_lots:
-            safe_lots = min(order_lots, int(float(bid_size) * 0.20))
-            metrics["safe_lots"] = safe_lots
-            if safe_lots < min_tradeable_lots:
-                reason = (
-                    f"Layer 2 Failed: Safe lots ({safe_lots}) below MIN_TRADEABLE_LOTS ({min_tradeable_lots}) "
-                    f"due to Top Bid depth {bid_size:.1f} < 500 lots required under 20% L1 footprint rule"
-                )
-                return False, reason, metrics
-        else:
-            safe_lots = order_lots
-            metrics["safe_lots"] = safe_lots
+        safe_lots = min(order_lots, int(float(bid_size) * 0.20))
+        metrics["safe_lots"] = safe_lots
+        if safe_lots < effective_min:
+            reason = (
+                f"Layer 2 Failed: Safe lots ({safe_lots}) below MIN_TRADEABLE_LOTS ({effective_min}) "
+                f"due to Top Bid depth {bid_size:.1f} < {min_required_depth:.0f} lots required under 20% L1 footprint rule"
+            )
+            return False, reason, metrics
 
         # Layer 3: Mark-to-Bid Discount (<= 2.0%)
         discount = (mark_price - best_bid) / mark_price
@@ -222,14 +223,23 @@ class DeltaCalculator:
         snap2_resp = self.client.request_public("GET", f"/v2/tickers/{symbol}")
         snap2_quotes = None
         if snap2_resp and snap2_resp.get("success"):
-            snap2_quotes = snap2_resp.get("result", {}).get("quotes")
-        else:
-            all_t_resp = self.client.request_public("GET", "/v2/tickers")
-            if all_t_resp and all_t_resp.get("success"):
-                for t in all_t_resp.get("result", []):
+            res = snap2_resp.get("result")
+            if isinstance(res, dict):
+                snap2_quotes = res.get("quotes")
+            elif isinstance(res, list):
+                for t in res:
                     if t.get("product_id") == product_id or t.get("symbol") == symbol:
                         snap2_quotes = t.get("quotes")
                         break
+        else:
+            all_t_resp = self.client.request_public("GET", "/v2/tickers")
+            if all_t_resp and all_t_resp.get("success"):
+                res_all = all_t_resp.get("result", [])
+                if isinstance(res_all, list):
+                    for t in res_all:
+                        if t.get("product_id") == product_id or t.get("symbol") == symbol:
+                            snap2_quotes = t.get("quotes")
+                            break
 
         if not snap2_quotes:
             reason = "Layer 4 Failed: Could not fetch snapshot 2 quote for 2.5s stability verification"
@@ -366,9 +376,9 @@ class DeltaCalculator:
             if (spread / mark_price) > 0.40:
                 continue
 
-            # 5. Depth check: Ensure orderbook has sufficient buyers for requested lot size
-            required_depth = float(lot_size if lot_size is not None else min_tradeable_lots)
-            if bid_size < required_depth:
+            # 5. Depth check: Ensure orderbook has sufficient buyers for minimum tradeable lot size
+            effective_min_depth = min(target_lots, min_tradeable_lots)
+            if bid_size < float(effective_min_depth):
                 continue
 
             # Extract contract tick_size for precise stop-loss rounding
@@ -430,12 +440,13 @@ class DeltaCalculator:
             best_ce["sizing_msg"] = sizing_msg
             best_pe["sizing_msg"] = sizing_msg
 
-            if final_lots < min_tradeable_lots:
+            effective_min = min(target_lots, min_tradeable_lots)
+            if final_lots < effective_min:
                 print(f"[ANTI-TRAP BLOCKED] Sizing below threshold: {sizing_msg}")
                 block_alert = TelegramNotifier.format_anti_trap_blocked_alert(
                     date_str=datetime.now().strftime("%Y-%m-%d"),
                     time_str=datetime.now().strftime("%H:%M:%S"),
-                    layer_name="Layer 2 — Top Bid Depth Cushion (< 500 contracts)",
+                    layer_name=f"Layer 2 — Top Bid Depth Cushion (< {effective_min * 5} contracts)",
                     contract_symbol=f"{best_ce['symbol']} / {best_pe['symbol']}",
                     violation_reason=sizing_msg,
                     mark_price=best_ce.get("mark_price"),
