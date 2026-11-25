@@ -366,7 +366,10 @@ class DeltaCalculator:
                 abs_delta = abs(float(delta))
         if abs_delta is None:
             return False
-        return 0.07 <= abs_delta <= 0.13
+        is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
+        min_delta = 0.03 if is_testnet else 0.07
+        max_delta = 0.30 if is_testnet else 0.13
+        return min_delta <= abs_delta <= max_delta
 
     def lock_10_delta_strikes(
         self,
@@ -431,7 +434,10 @@ class DeltaCalculator:
                 continue
 
             abs_delta = abs(raw_delta)
-            if not (0.07 <= abs_delta <= 0.13):
+            is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
+            min_delta = 0.03 if is_testnet else 0.07
+            max_delta = 0.30 if is_testnet else 0.13
+            if not (min_delta <= abs_delta <= max_delta):
                 continue
 
             quotes = ticker.get("quotes") or {}
@@ -443,7 +449,6 @@ class DeltaCalculator:
             if best_bid <= 0.0 or best_ask <= 0.0:
                 continue
 
-            is_testnet = "testnet" in getattr(self.client, "base_url", "").lower()
             min_mark = 0.10 if is_testnet else 5.0
             if mark_price < min_mark:
                 continue
