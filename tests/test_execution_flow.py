@@ -315,6 +315,7 @@ def test_smart_entry_retry_loop_recovers_after_micro_bid(
     with (
         patch.object(entry_job, "ENTRY_WINDOW_SECONDS", 10),
         patch.object(entry_job, "ENTRY_RETRY_INTERVAL_SECONDS", 5),
+        patch.object(entry_job, "DRY_RUN", True),
     ):
         entry_job.run()
 
@@ -439,7 +440,8 @@ def test_phase2_sniper_execution_uses_prelocked_targets(
     mock_execute.return_value = {"success": True, "ce": {"sl_trigger": 60.0}, "pe": {"sl_trigger": 40.0}}
 
     now_10am = datetime(2026, 11, 25, 10, 0, 0)
-    res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
+    with patch.object(entry_job, "DRY_RUN", True):
+        res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
 
     assert res is True
     # Verify get_10_delta_strikes was called with locked_ce and locked_pe (None when entering at 10:00 directly)
@@ -525,6 +527,7 @@ def test_two_stage_patience_and_fallback_execution(
         patch("time.time", side_effect=lambda: next(time_iter, 95.0)),
         patch.object(entry_job, "FULL_TARGET_WAIT_SECONDS", 90),
         patch.object(entry_job, "MIN_FALLBACK_LOTS", 500),
+        patch.object(entry_job, "DRY_RUN", True),
     ):
         now_10am = datetime(2026, 11, 25, 10, 0, 0)
         res = entry_job.run(now_fn=lambda: now_10am, sleep_fn=lambda _s: None)
