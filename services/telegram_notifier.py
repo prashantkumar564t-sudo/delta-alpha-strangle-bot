@@ -5,6 +5,10 @@ import os
 import urllib.parse
 import urllib.request
 
+from config.settings import TELEGRAM_BOT_TOKEN as CFG_BOT_TOKEN
+from config.settings import TELEGRAM_CHANNEL_ID as CFG_CHANNEL_ID
+from config.settings import TELEGRAM_CHAT_ID as CFG_CHAT_ID
+
 
 class TelegramNotifier:
     """
@@ -23,9 +27,9 @@ class TelegramNotifier:
         chat_id: str | None = None,
         channel_id: str | None = None,
     ):
-        self.bot_token = (bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
-        self.chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", "")).strip()
-        self.channel_id = (channel_id or os.getenv("TELEGRAM_CHANNEL_ID", "")).strip()
+        self.bot_token = (bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "") or CFG_BOT_TOKEN).strip()
+        self.chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", "") or CFG_CHAT_ID).strip()
+        self.channel_id = (channel_id or os.getenv("TELEGRAM_CHANNEL_ID", "") or CFG_CHANNEL_ID).strip()
 
     def send_to_chat(self, target_chat_id: str, text: str) -> bool:
         """Sends a markdown-formatted message to a specific chat or channel ID."""
